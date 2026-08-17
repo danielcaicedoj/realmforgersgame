@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Forjadores del Reino — RPG de Armas</title>
+<link rel="stylesheet" href="styles.css?v=63">
+</head>
+<body>
+<div id="game-container">
+    <canvas id="gameCanvas" width="960" height="600"></canvas>
+
+    <!-- HUD arriba a la izquierda: vida, xp, arma equipada -->
+    <div id="hud">
+        <div id="hud-profession">
+            <span id="hud-prof-emoji">🗡️</span>
+            <span id="hud-prof-name">PÍCARO</span>
+            <span id="hud-prof-level">LVL 0</span>
+        </div>
+        <div class="hud-bar-row">
+            <span class="hud-label">❤️</span>
+            <div class="bar-track"><div id="hud-hp-fill" class="bar-fill hp-fill"></div></div>
+            <span id="hud-hp-text" class="hud-bar-text">100/100</span>
+        </div>
+        <div class="hud-bar-row">
+            <span class="hud-label">XP</span>
+            <div class="bar-track"><div id="hud-xp-fill" class="bar-fill xp-fill"></div></div>
+            <span id="hud-xp-text" class="hud-bar-text">0/100</span>
+        </div>
+        <div id="hud-weapon-row">
+            <span id="hud-weapon">🗡️ Daga de BRONCE</span>
+            <span id="hud-enchant"></span>
+            <span id="hud-arrows" class="hidden">🏹 20/20</span>
+        </div>
+    </div>
+
+    <!-- HUD abajo a la izquierda: piso y enemigos -->
+    <div id="floor-hud">
+        <span>🏰 <span id="floor-number">1/1000</span></span>
+        <span>👹 <span id="floor-enemy-count">0</span></span>
+        <span id="floor-boss-icon" class="hidden">👑</span>
+    </div>
+
+    <div id="level-up-toast-container"></div>
+
+    <div id="minimap-container">
+        <div id="minimap-label">MAPA</div>
+        <canvas id="minimap" width="192" height="120"></canvas>
+    </div>
+
+    <div id="hint-bar">
+        <span><b>WASD/Flechas</b> Mover</span>
+        <span><b>Click/Espacio</b> Combate/Recolectar</span>
+        <span><b>Click</b> Portal 🌀</span>
+        <span><b>I</b> Inventario</span>
+        <span><b>E</b> Encantar</span>
+        <span><b>M</b> Mapa</span>
+        <span><b>C</b> Crafteo</span>
+        <span><b>V</b> Estadísticas</span>
+        <span><b>P</b> Pisos</span>
+        <span><b>G</b> Guía</span>
+        <span><b>1-3 / Espacio</b> Ataques / Pasar turno (combate) · <b>G</b> Poción (combate)</span>
+    </div>
+
+    <!-- Panel de Mapa (minimapa ampliado) -->
+    <div id="map-panel" class="panel map-panel hidden">
+        <div class="panel-header">
+            <h2>🗺️ MAPA DEL PISO</h2>
+            <button class="close-btn" data-close="map-panel">✕</button>
+        </div>
+        <div class="panel-body map-panel-body">
+            <canvas id="map-large" width="800" height="500"></canvas>
+        </div>
+    </div>
+
+    <!-- Panel de Crafteo -->
+    <div id="craft-panel" class="panel craft-panel hidden">
+        <div class="panel-header">
+            <h2>🛠️ CRAFTEO</h2>
+            <button class="close-btn" data-close="craft-panel">✕</button>
+        </div>
+        <div class="panel-body">
+            <div class="panel-note">Cada objeto requiere material del tier + 1 núcleo de monstruo. La rareza del núcleo define la rareza del objeto.</div>
+            <div id="craft-prof-selector" class="craft-prof-selector"></div>
+            <div id="craft-list" class="craft-list"></div>
+        </div>
+    </div>
+
+    <!-- Panel de Inventario -->
+    <div id="inventory-panel" class="panel hidden">
+        <div class="panel-header">
+            <h2>🎒 INVENTARIO</h2>
+            <button class="close-btn" data-close="inventory-panel">✕</button>
+        </div>
+        <div id="inventory-list" class="panel-body"></div>
+    </div>
+
+
+    <!-- Panel de Encantamientos -->
+    <div id="enchant-panel" class="panel hidden">
+        <div class="panel-header">
+            <h2>✨ ENCANTAMIENTOS</h2>
+            <button class="close-btn" data-close="enchant-panel">✕</button>
+        </div>
+        <div id="enchant-list" class="panel-body"></div>
+    </div>
+
+    <!-- Panel de Estadísticas -->
+    <div id="stats-panel" class="panel hidden">
+        <div class="panel-header">
+            <h2>📊 ESTADÍSTICAS</h2>
+            <button class="close-btn" data-close="stats-panel">✕</button>
+        </div>
+        <div id="stats-list" class="panel-body"></div>
+    </div>
+
+    <!-- Panel de Guía -->
+    <div id="guide-panel" class="panel guide-panel hidden">
+        <div class="panel-header">
+            <h2>📖 GUÍA DEL JUEGO</h2>
+            <button class="close-btn" data-close="guide-panel">✕</button>
+        </div>
+        <div id="guide-list" class="panel-body"></div>
+    </div>
+
+    <!-- Panel de Pisos (navegación jerárquica + teletransportación) -->
+    <div id="floors-panel" class="panel floors-panel hidden">
+        <div class="panel-header">
+            <h2>🏰 PISOS</h2>
+            <button class="close-btn" data-close="floors-panel">✕</button>
+        </div>
+        <div id="floors-body" class="panel-body"></div>
+    </div>
+
+    <!-- Pantalla de Combate por Turnos -->
+    <div id="combat-panel" class="panel combat-panel hidden">
+        <div class="panel-header">
+            <h2>⚔️ COMBATE</h2>
+        </div>
+        <div class="panel-body">
+            <div id="combat-turn-order" class="combat-turn-order"></div>
+            <div id="combat-status" class="combat-status"></div>
+            <div id="combat-enemies" class="combat-enemies"></div>
+            <div id="combat-player" class="combat-enemy-card combat-player-card"></div>
+            <div id="combat-log" class="combat-log"></div>
+            <div id="combat-potions" class="combat-potions"></div>
+            <div id="combat-ap-info" class="combat-ap-info hidden"></div>
+            <div id="combat-attacks" class="combat-attacks"></div>
+            <div class="combat-actions">
+                <button id="combat-endturn-btn" class="combat-btn">⏭️ Terminar Turno</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Pantalla de Victoria / Drops -->
+    <div id="victory-panel" class="panel victory-panel hidden">
+        <div class="panel-header">
+            <h2>🏆 VICTORIA</h2>
+        </div>
+        <div class="panel-body">
+            <div class="panel-note">Derrotaste a:</div>
+            <div id="victory-summary" class="victory-summary"></div>
+            <div id="victory-xp" class="victory-xp"></div>
+            <div class="panel-note">Objetos obtenidos:</div>
+            <div id="victory-drops" class="combat-enemies"></div>
+            <button id="victory-continue-btn" class="apply-btn">Continuar</button>
+        </div>
+    </div>
+
+    <div id="game-over" class="hidden">
+        <h1>💀 HAS CAÍDO</h1>
+        <p>Presiona R para reaparecer</p>
+    </div>
+
+    <!-- Overlay de fundido para la teletransportación entre pisos (ver
+         UI.playTeleportFade en ui.js) -->
+    <div id="teleport-fade" class="hidden"></div>
+</div>
+
+<script src="js/constants.js?v=63"></script>
+<script src="js/foods.js?v=63"></script>
+<script src="js/weapon-attacks.js?v=63"></script>
+<script src="js/floors.js?v=63"></script>
+<script src="js/grid-dungeon.js?v=63"></script>
+<script src="js/enchantments.js?v=63"></script>
+<script src="js/mounts.js?v=63"></script>
+<script src="js/weapons.js?v=63"></script>
+<script src="js/storage.js?v=63"></script>
+<script src="js/player.js?v=63"></script>
+<script src="js/enemy.js?v=63"></script>
+<script src="js/combat.js?v=63"></script>
+<script src="js/ui.js?v=63"></script>
+<script src="js/game.js?v=63"></script>
+</body>
+</html>
