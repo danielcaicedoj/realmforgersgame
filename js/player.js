@@ -57,6 +57,17 @@ class Player {
         this.burn = null;   // { dmg, turnsLeft }
         this.frozenNextTurn = false; // el próximo turno empieza con la mitad de PA
 
+        // Escudo del Tanque (Golpe de Escudo / especiales por tier, ver
+        // weapon-attacks.js y combat.js): absorbe daño entrante antes de
+        // tocar la vida real. amount = HP restantes por absorber, turnsLeft
+        // = turnos hasta que expire (aunque no lo hayan roto). Los campos
+        // opcionales (armorBonusPercent, enemyDmgReducePercent,
+        // reflectPercent, burnAttacker, healPercentPerTurn,
+        // blockBonusPercent, dodgeBonusChance) vienen de los especiales
+        // únicos de cada Tier (Ataque 3). Nunca se persiste (combate-only,
+        // como burn/frozenNextTurn).
+        this.shield = null;
+
         this.levelUpFlashes = []; // {professionId, until}
 
         this.loadFromSave();
@@ -91,8 +102,17 @@ class Player {
         if (typeof data.maxFloorReached === 'number') this.maxFloorReached = data.maxFloorReached;
         if (data.defeatedFloorBosses) this.defeatedFloorBosses = data.defeatedFloorBosses;
         if (typeof data.finalBossPoints === 'number') this.finalBossPoints = data.finalBossPoints;
-        if (Array.isArray(data.craftedItems)) this.craftedItems = data.craftedItems;
-        if (data.equippedCraftedByProf) this.equippedCraftedByProf = data.equippedCraftedByProf;
+        // Objetos crafteados de profesiones eliminadas (ej. Segador) se
+        // descartan directamente en vez de quedar huérfanos en el bolso.
+        if (Array.isArray(data.craftedItems)) {
+            this.craftedItems = data.craftedItems.filter(it => getProfession(it.profId));
+        }
+        if (data.equippedCraftedByProf) {
+            this.equippedCraftedByProf = {};
+            Object.keys(data.equippedCraftedByProf).forEach(profId => {
+                if (getProfession(profId)) this.equippedCraftedByProf[profId] = data.equippedCraftedByProf[profId];
+            });
+        }
         if (Array.isArray(data.mounts)) this.mounts = data.mounts;
         if (data.equippedMountId) this.equippedMountId = data.equippedMountId;
         if (Array.isArray(data.foodBuffs)) this.foodBuffs = data.foodBuffs;
@@ -254,14 +274,39 @@ class Player {
         const buffDefense = this.foodBuffs.filter(b => b.stat === 'defensa').reduce((s, b) => s + b.amount, 0);
         const enchantDefense = this.getActiveEnchantEffects().flatDefenseBonus;
         const crafted = this.getEquippedCraftedItem('armadura');
-        if (crafted) {
-            const tier = TIERS.find(t => t.id === crafted.tierId);
-            const rarity = getMonsterRarity(crafted.rarityId);
-            return { tier, defense: crafted.defense + buffDefense + enchantDefense, rarity, craftedItemId: crafted.id };
+        const info = crafted
+            ? { tier: TIERS.find(t => t.id === crafted.tierId), defense: crafted.defense + buffDefense + enchantDefense, rarity: getMonsterRarity(crafted.rarityId), craftedItemId: crafted.id }
+            : { tier: getTierForLevel(this.level), defense: Math.round(this.level * 0.056 + getTierForLevel(this.level).id * 3) + buffDefense + enchantDefense };
+
+        // Bono de armadura del Tanque: Resistencia (cargas activas, +10%
+        // c/u, ver Combat.classCharge) + el escudo activo (armorBonusPercent
+        // de los especiales por Tier, ver weapon-attacks.js). Multiplicativo
+        // sobre la defensa ya calculada arriba.
+        const armorBonusPercent = this.getTanqueArmorBonusPercent();
+        if (armorBonusPercent) info.defense = Math.round(info.defense * (1 + armorBonusPercent) * 10) / 10;
+        return info;
+    }
+
+    getTanqueArmorBonusPercent() {
+        let bonus = 0;
+        if (typeof Combat !== 'undefined' && Combat.classCharge && Combat.classCharge.prof === 'tanque') {
+            bonus += Combat.classCharge.count * 0.10;
         }
-        const tier = getTierForLevel(this.level);
-        const defense = Math.round(this.level * 0.056 + tier.id * 3) + buffDefense + enchantDefense;
-        return { tier, defense };
+        if (this.shield && this.shield.armorBonusPercent) bonus += this.shield.armorBonusPercent;
+        return bonus;
+    }
+
+    // Daño entrante: primero lo absorbe el escudo activo (si hay), luego el
+    // remanente (si sobra) pasa por takeDamage normal (armadura, reducción
+    // de daño de encantamientos, etc.). Devuelve el daño REAL aplicado a la
+    // vida (0 si el escudo absorbió todo el golpe).
+    absorbDamage(amount) {
+        if (!this.shield || this.shield.amount <= 0) return this.takeDamage(amount);
+        const absorbed = Math.min(this.shield.amount, amount);
+        this.shield.amount -= absorbed;
+        if (this.shield.amount <= 0) this.shield = null; // escudo roto
+        const remainder = amount - absorbed;
+        return remainder > 0 ? this.takeDamage(remainder) : 0;
     }
 
     // Estadísticas efectivas: base + bonos temporales de alimentos activos
@@ -590,8 +635,10 @@ class Player {
         if (this.level >= MAX_LEVEL) return;
         this.xp += amount;
         let leveledUp = false;
-        while (this.xp >= XP_PER_LEVEL && this.level < MAX_LEVEL) {
-            this.xp -= XP_PER_LEVEL;
+        while (this.level < MAX_LEVEL) {
+            const required = getXPRequiredForLevel(this.level + 1);
+            if (this.xp < required) break;
+            this.xp -= required;
             this.level++;
             this.statPoints += STAT_POINTS_PER_LEVEL;
             leveledUp = true;

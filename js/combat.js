@@ -52,13 +52,14 @@ const Combat = {
         this.log = [];
         this.loot = { xp: 0, defeated: [], materials: {} };
         this.xpPenalty = 1;
-        this.player.blocking = false;
+        this.player.shield = null;
         this.playerAP = BASE_AP + this.player.getFoodPABonus();
         this.playerCharge = 0;
         this.potionUsesLeft = 3;
         this.usedPotionThisTurn = false;
         this.basicAttacksThisTurn = 0;
         this.classCharge = { prof: null, count: 0 };
+        this.tauntTurnsLeft = 0;
 
         const entries = [{ kind: 'player', initiative: rollD20() }];
         enemyList.forEach(e => entries.push({ kind: 'enemy', ref: e, initiative: rollD20() }));
@@ -143,7 +144,6 @@ const Combat = {
         const entry = this.order[this.turnIndex];
 
         if (entry.kind === 'player') {
-            this.player.blocking = false;
             this.usedPotionThisTurn = false;
             this.basicAttacksThisTurn = 0;
             let apBase = BASE_AP;
@@ -156,6 +156,22 @@ const Combat = {
                 this.addLog(`🔥 Sufrís ${burnDmg} HP de quemadura.`);
                 const rBurn = this.checkEnd();
                 if (rBurn) { this.end(rBurn); return; }
+            }
+
+            // Escudo del Tanque: cuenta regresiva por turno propio + curación
+            // pasiva (Bulwark Estelar) mientras esté activo; expira solo si
+            // no lo rompieron antes por absorción total (ver Player.absorbDamage).
+            if (this.player.shield) {
+                if (this.player.shield.healPercentPerTurn) {
+                    const healAmt = Math.round(this.player.maxHp * this.player.shield.healPercentPerTurn);
+                    this.player.heal(healAmt);
+                    this.addLog(`💚 Tu escudo restaura ${healAmt} HP.`);
+                }
+                this.player.shield.turnsLeft--;
+                if (this.player.shield.turnsLeft <= 0) {
+                    this.player.shield = null;
+                    this.addLog('🛡️ Tu escudo se desvanece.');
+                }
             }
             if (this.player.frozenNextTurn) {
                 apBase = Math.ceil(BASE_AP / 2);
@@ -225,6 +241,16 @@ const Combat = {
         if (enemy.type.ability === 'doubleAttack' && enemy.alive && this.player.hp > 0) {
             this.performEnemyAttack(enemy);
         }
+
+        // Taunt de Golpe de Escudo (ver weapon-attacks.js/playerAttackWithAP):
+        // cuenta 3 turnos ENEMIGOS. Este juego no tiene aliados del jugador,
+        // así que hoy no cambia a quién atacan (ya solo pueden atacarte a
+        // vos); se trackea igual para que el efecto quede correctamente
+        // acotado a 3 turnos si en el futuro se agregan aliados.
+        if (this.tauntTurnsLeft > 0) {
+            this.tauntTurnsLeft--;
+            if (this.tauntTurnsLeft <= 0) this.addLog('😤 El Taunt del Tanque termina.');
+        }
     },
 
     // Ejecuta un golpe del enemigo contra el jugador (usado también por
@@ -244,17 +270,33 @@ const Combat = {
         if (enemy.type.ability === 'damageMultiplier') baseDmg = Math.round(baseDmg * 1.6);
 
         const player = this.player;
-        const blockChance = Math.min(MAX_BLOCK_CHANCE, player.stats.constitucion * STAT_CONSTITUCION_BLOCK_CHANCE);
-        const dodgeChance = Math.min(MAX_DODGE_CHANCE, player.stats.agilidad * STAT_AGILIDAD_DODGE_CHANCE);
+        const shield = player.shield;
+        // Resistencia del Tanque (cargas activas, ver Combat.classCharge):
+        // +5% bloqueo por carga, acumulativo mientras no se consuman.
+        const resistenciaCharges = (this.classCharge.prof === 'tanque') ? this.classCharge.count : 0;
+        const blockChance = Math.min(MAX_BLOCK_CHANCE,
+            player.stats.constitucion * STAT_CONSTITUCION_BLOCK_CHANCE
+            + resistenciaCharges * 0.05
+            + (shield && shield.blockBonusPercent ? shield.blockBonusPercent : 0));
+        const dodgeChance = Math.min(MAX_DODGE_CHANCE,
+            player.stats.agilidad * STAT_AGILIDAD_DODGE_CHANCE
+            + (shield && shield.dodgeBonusChance ? shield.dodgeBonusChance : 0));
 
-        let dmg = 0, blocked = false, dodged = false;
+        let dmg = 0, blocked = false, dodged = false, incomingRaw = 0;
         if (Math.random() < blockChance) {
             blocked = true;
-            dmg = player.takeDamage(baseDmg * (1 - BLOCK_DAMAGE_REDUCTION));
+            incomingRaw = baseDmg * (1 - BLOCK_DAMAGE_REDUCTION);
         } else if (Math.random() < dodgeChance) {
             dodged = true;
         } else {
-            dmg = player.takeDamage(baseDmg);
+            incomingRaw = baseDmg;
+        }
+
+        if (!dodged) {
+            // Fortaleza de Hierro+ (ver weapon-attacks.js): reduce el daño
+            // enemigo un % adicional mientras el escudo esté activo.
+            if (shield && shield.enemyDmgReducePercent) incomingRaw *= (1 - shield.enemyDmgReducePercent);
+            dmg = player.absorbDamage(incomingRaw);
         }
 
         const note = blocked ? ` (¡bloqueado! -${Math.round(BLOCK_DAMAGE_REDUCTION * 100)}%)` : dodged ? ' (¡esquivado!)' : '';
@@ -274,6 +316,20 @@ const Combat = {
             if (enemy.type.ability === 'freezeHalfAP') {
                 this.player.frozenNextTurn = true;
                 this.addLog('🧊 Sentís que tus movimientos se congelan.');
+            }
+
+            // Muralla de Acero+: refleja un % del golpe recibido (antes de
+            // absorción/armadura) de vuelta al atacante.
+            if (shield && shield.reflectPercent && enemy.alive) {
+                const reflectDmg = incomingRaw * shield.reflectPercent;
+                const dealt = enemy.takeDamage(reflectDmg, { flatPenetration: player.stats.destreza * STAT_DESTREZA_ARMOR_PEN });
+                this.addLog(`🪞 Tu escudo refleja: -${dealt} HP a ${enemy.type.name}.`);
+                if (!enemy.alive) this.onEnemyDefeated(enemy);
+            }
+            // Escudo Infernal: quema a quien te ataque mientras esté activo.
+            if (shield && shield.burnAttacker && enemy.alive) {
+                enemy.burn = { dmg: shield.burnAttacker.dmg, turnsLeft: shield.burnAttacker.turns };
+                this.addLog(`🔥 Tu escudo infernal quema a ${enemy.type.name}.`);
             }
         }
 
@@ -534,13 +590,17 @@ const Combat = {
             for (let i = 0; i < atk.arrowCost; i++) player.useArrow();
         }
 
-        // Golpe Devastador (Claymore): bono al segundo ataque básico del
+        // Golpe Devastador (Espada, ex-Claymore): bono al segundo ataque básico del
         // turno. attackIndex 2 (especial) no cuenta como básico.
         if (attackIndex < 2) this.basicAttacksThisTurn++;
         const isSecondAttack = attackIndex < 2 && this.basicAttacksThisTurn === 2;
 
+        // Martillazo (Tanque): daño base + Vida_Máxima × coeficiente (ver
+        // weapon-attacks.js maxHpDamageCoeff), antes de aplicar Potencia.
+        const baseDamage = atk.damage + (atk.maxHpDamageCoeff ? player.maxHp * atk.maxHpDamageCoeff : 0);
+
         const potenciaMult = 1 + player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
-        let dmg = atk.damage * potenciaMult * (1 + eff.dmgBonusPercent);
+        let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
         if (isSecondAttack && eff.secondAttackBonusPercent) dmg *= (1 + eff.secondAttackBonusPercent);
 
         const critBase = getWeaponCritBase(player.activeProfession) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
@@ -625,6 +685,50 @@ const Combat = {
                 if (chargeConsumed > 0) effectiveAtk._magoReboundCount = chargeConsumed;
                 classNote = ` · 📚AMPLIFICACIÓN x${chargeConsumed} (${chargeConsumed + 1} objetivo${chargeConsumed > 0 ? 's' : ''})`;
             }
+        } else if (profId === 'tanque' && atk.consumesClassCharge) {
+            // Golpe de Escudo: consume RESISTENCIA para más daño + un escudo
+            // (% vida máxima, con bono por Tier del arma y por Nivel, ver
+            // weapon-attacks.js) + Taunt de 3 turnos. Martillazo
+            // (grantsClassCharge) no necesita rama propia: su daño ya
+            // incluye el término de Vida Máxima (ver baseDamage arriba).
+            const mult = [1, 1.25, 1.5, 2.0][chargeConsumed];
+            effectiveAtk.damage = dmg * mult;
+
+            const shieldPercentByCharge = [0.20, 0.25, 0.30, 0.40][chargeConsumed];
+            const weaponTierId = player.getCurrentWeapon().tier.id;
+            const tierBonus = weaponTierId <= 3 ? 0.05 : (weaponTierId <= 6 ? 0.10 : 0.15);
+            const totalPercent = (shieldPercentByCharge + tierBonus) * (1 + player.level * 0.005);
+            const shieldAmount = Math.round(player.maxHp * totalPercent);
+            player.shield = { amount: shieldAmount, turnsLeft: 3 };
+            this.tauntTurnsLeft = 3;
+            classNote = ` · 🔰RESISTENCIA x${chargeConsumed} (Escudo +${shieldAmount} HP, Taunt 3 turnos)`;
+        }
+
+        // Especiales únicos por Tier del Tanque (Ataque 3, ver
+        // weapon-attacks.js "grantsShield"): otorgan su propio escudo,
+        // reemplazando cualquier escudo activo. enemyStatsDownPercent
+        // (Defensa Divina) se aplica una sola vez, al elenco de enemigos
+        // vivos en este momento.
+        if (atk.grantsShield) {
+            const g = atk.grantsShield;
+            player.shield = {
+                amount: Math.round(player.maxHp * g.percent),
+                turnsLeft: g.turns,
+                armorBonusPercent: g.armorBonusPercent,
+                enemyDmgReducePercent: g.enemyDmgReducePercent,
+                reflectPercent: g.reflectPercent,
+                burnAttacker: g.burnAttacker,
+                healPercentPerTurn: g.healPercentPerTurn,
+                blockBonusPercent: g.blockBonusPercent,
+                dodgeBonusChance: g.dodgeBonusChance,
+            };
+            if (g.enemyStatsDownPercent) {
+                this.getAliveEnemies().forEach(en => {
+                    en.defenseMod = { percent: g.enemyStatsDownPercent, flat: 0, turnsLeft: 3 };
+                    en.attackMod = { flat: Math.round(en.type.dmg * g.enemyStatsDownPercent), turnsLeft: 3 };
+                });
+            }
+            classNote = ` · 🛡️Escudo +${player.shield.amount} HP (${g.turns} turnos)`;
         }
 
         const { totalDamage, lines, hadCrit } = this.resolveAttackDamage(effectiveAtk, target, eff);
@@ -782,13 +886,17 @@ const Combat = {
 
     onEnemyDefeated(target) {
         const player = this.player;
-        const xpGain = Math.round(target.type.xp * (this.xpPenalty || 1));
+        const rarity = target.type.rarity || MONSTER_RARITIES[0];
+        const bossKind = target.type.bossKind; // undefined | 'minijefe'|'jefe'|'jefe_final'|'jefe_especial'|'jefe_aleatorio'
+
+        // XP por enemigo: 10 × Piso × Multiplicador_Rareza × Escala_Minijefe_Jefe
+        // (ver getEnemyXPReward en constants.js) — reemplaza el viejo
+        // target.type.xp escalado por piso.
+        const xpGain = Math.round(getEnemyXPReward(player.floor, rarity.id, bossKind) * (this.xpPenalty || 1));
         player.gainXP(xpGain);
         this.loot.xp += xpGain;
         this.loot.defeated.push({ emoji: target.type.emoji, name: target.type.name });
 
-        const rarity = target.type.rarity || MONSTER_RARITIES[0];
-        const bossKind = target.type.bossKind; // undefined | 'minijefe'|'jefe'|'jefe_final'|'jefe_especial'|'jefe_aleatorio'
         const materialTierId = getMaterialTierForFloor(player.floor);
         const rarityIdx = MONSTER_RARITIES.findIndex(r => r.id === rarity.id);
 
@@ -859,7 +967,12 @@ const Combat = {
             this.grantRandomTierMaterials(20, materialTierId);
         }
 
-        this.addLog(`💀 ${target.type.name} derrotado. +${xpGain} XP`);
+        // El XP ganado se resalta con el color de Rareza del enemigo (y en
+        // negrita a partir de Épico) para que se note la diferencia de un
+        // vistazo en el log de combate, que funciona como el "flotante" de
+        // XP en este panel modal por turnos (ver INTERFAZ Y FEEDBACK).
+        const xpStyle = `color:${rarity.color};${rarityIdx >= 3 ? 'font-weight:bold' : ''}`;
+        this.addLog(`💀 ${target.type.name} derrotado. <span style="${xpStyle}">+${xpGain} XP</span>`);
         if (this.onKillHook) this.onKillHook(target);
     },
 

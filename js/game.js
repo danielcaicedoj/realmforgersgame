@@ -581,6 +581,16 @@
         window.addEventListener('keydown', e => {
             const key = e.key.toLowerCase();
 
+            // Ventana de Victoria: Espacio equivale a click en "Continuar".
+            // e.repeat descarta el auto-repeat del SO al mantener apretada
+            // la tecla; el propio ocultamiento del panel (ver
+            // UI.triggerVictoryContinue) evita activaciones múltiples.
+            if (key === ' ' && UI.isVictoryPanelVisible()) {
+                e.preventDefault();
+                if (!e.repeat) UI.triggerVictoryContinue();
+                return;
+            }
+
             if (Combat.active) {
                 if (key === '1' || key === '2' || key === '3') {
                     e.preventDefault();

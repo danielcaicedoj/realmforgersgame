@@ -262,120 +262,6 @@ const WEAPON_ATTACKS = {
         },
     },
 
-    // ===== HERRERO (Martillo) =====
-    // "GOLPE CON PESO": el texto original dice "reduce velocidad del enemigo
-    // (ataca más lento)" sin porcentaje; se interpreta como un debuff de
-    // ataque moderado (no un aturdimiento completo) para no ser demasiado
-    // fuerte en un ataque básico de tier 1. Ajustable si la intención era otra.
-    herrero: {
-        tiers: {
-            1: {
-                basic: [
-                    { name: 'Golpe de Martillo', emoji: '🔨', apCost: 3, damage: 10, chargeGain: 1 },
-                    { name: 'Golpe con Peso', emoji: '⚖️', apCost: 4, damage: 14, chargeGain: 2, attackDownFlat: 2, attackDownTurns: 1 },
-                ],
-                special: { name: 'Forja', emoji: '⚒️', apCost: 6, damage: 26, chargeRequired: 3, heal: 3 },
-            },
-            2: {
-                basic: [
-                    { name: 'Golpe de Martillo', emoji: '🔨', apCost: 3, damage: 13, chargeGain: 1 },
-                    { name: 'Golpe con Peso', emoji: '⚖️', apCost: 4, damage: 17, chargeGain: 2, attackDownFlat: 2, attackDownTurns: 1 },
-                ],
-                special: { name: 'Forja', emoji: '⚒️', apCost: 6, damage: 31, chargeRequired: 3, heal: 3 },
-            },
-            3: {
-                basic: [
-                    { name: 'Golpe de Martillo', emoji: '🔨', apCost: 3, damage: 16, chargeGain: 1 },
-                    { name: 'Golpe con Peso', emoji: '⚖️', apCost: 4, damage: 20, chargeGain: 2, attackDownFlat: 2, attackDownTurns: 1 },
-                ],
-                special: { name: 'Forja', emoji: '⚒️', apCost: 6, damage: 36, chargeRequired: 3, heal: 3 },
-            },
-            4: {
-                basic: [
-                    { name: 'Golpe Ardiente', emoji: '🔥', apCost: 3, damage: 19, chargeGain: 1, burn: { dmg: 1, turns: 2 } },
-                    { name: 'Golpe de Fragua', emoji: '⚒️', apCost: 4, damage: 23, chargeGain: 2, heal: 2, burn: { dmg: 1, turns: 2 } },
-                ],
-                special: { name: 'Fragua Ardiente', emoji: '🔥', apCost: 6, damage: 46, chargeRequired: 4, heal: 5 },
-            },
-            5: {
-                basic: [
-                    { name: 'Golpe Mágico', emoji: '✨', apCost: 3, damage: 22, chargeGain: 1, penetratePercent: 0.10 },
-                    { name: 'Golpe Potente', emoji: '💪', apCost: 4, damage: 26, chargeGain: 2, heal: 3 },
-                ],
-                special: { name: 'Encantamiento', emoji: '✨', apCost: 6, damage: 51, chargeRequired: 4, heal: 6 },
-            },
-            6: {
-                basic: [
-                    { name: 'Golpe Divino', emoji: '🌟', apCost: 3, damage: 25, chargeGain: 1, heal: 3 },
-                    { name: 'Golpe Celestial', emoji: '🌟', apCost: 4, damage: 29, chargeGain: 2, heal: 4 },
-                ],
-                special: { name: 'Bendición', emoji: '🙏', apCost: 6, damage: 56, chargeRequired: 5, heal: 8 },
-            },
-            7: {
-                basic: [
-                    { name: 'Golpe Perfecto', emoji: '🔨', apCost: 3, damage: 28, chargeGain: 1, heal: 3, critChance: 0.10, critMultiplier: 1.5 },
-                    { name: 'Golpe Supremo', emoji: '💪', apCost: 4, damage: 32, chargeGain: 2, heal: 4, critChance: 0.10, critMultiplier: 1.5 },
-                ],
-                special: { name: 'Creación', emoji: '✨', apCost: 6, damage: 61, chargeRequired: 5, heal: 10, critChance: 0.20, critMultiplier: 2 },
-            },
-        },
-    },
-
-    // ===== SEGADOR (Azada) =====
-    segador: {
-        tiers: {
-            1: {
-                basic: [
-                    { name: 'Cortadura', emoji: '🌾', apCost: 3, damage: 9, chargeGain: 1 },
-                    { name: 'Barrida', emoji: '🌊', apCost: 4, damage: 12, aoe: true, chargeGain: 2 },
-                ],
-                special: { name: 'Siega', emoji: '💀', apCost: 6, damage: 24, chargeRequired: 3 },
-            },
-            2: {
-                basic: [
-                    { name: 'Cortadura', emoji: '🌾', apCost: 3, damage: 12, chargeGain: 1 },
-                    { name: 'Barrida', emoji: '🌊', apCost: 4, damage: 15, aoe: true, chargeGain: 2 },
-                ],
-                special: { name: 'Siega', emoji: '💀', apCost: 6, damage: 29, chargeRequired: 3 },
-            },
-            3: {
-                basic: [
-                    { name: 'Cortadura', emoji: '🌾', apCost: 3, damage: 15, chargeGain: 1 },
-                    { name: 'Barrida', emoji: '🌊', apCost: 4, damage: 18, aoe: true, chargeGain: 2 },
-                ],
-                special: { name: 'Siega', emoji: '💀', apCost: 6, damage: 34, chargeRequired: 3 },
-            },
-            4: {
-                basic: [
-                    { name: 'Cortadura Ardiente', emoji: '🔥', apCost: 3, damage: 18, chargeGain: 1, burn: { dmg: 1, turns: 2 } },
-                    { name: 'Barrida Infernal', emoji: '🔥', apCost: 4, damage: 21, aoe: true, chargeGain: 2, burn: { dmg: 1, turns: 2 } },
-                ],
-                special: { name: 'Cosecha de Fuego', emoji: '🔥', apCost: 6, damage: 44, aoe: true, chargeRequired: 4 },
-            },
-            5: {
-                basic: [
-                    { name: 'Cortadura Mágica', emoji: '✨', apCost: 3, damage: 21, chargeGain: 1 },
-                    { name: 'Barrida Mágica', emoji: '✨', apCost: 4, damage: 24, aoe: true, chargeGain: 2 },
-                ],
-                special: { name: 'Cosecha Mágica', emoji: '✨', apCost: 6, damage: 49, chargeRequired: 4 },
-            },
-            6: {
-                basic: [
-                    { name: 'Cortadura Celestial', emoji: '🌟', apCost: 3, damage: 24, chargeGain: 1 },
-                    { name: 'Barrida Celestial', emoji: '🌟', apCost: 4, damage: 27, aoe: true, chargeGain: 2 },
-                ],
-                special: { name: 'Cosecha Celestial', emoji: '🌟', apCost: 6, damage: 54, chargeRequired: 5 },
-            },
-            7: {
-                basic: [
-                    { name: 'Cortadura Perfecta', emoji: '🌾', apCost: 3, damage: 27, chargeGain: 1, critChance: 0.10, critMultiplier: 1.5 },
-                    { name: 'Barrida Perfecta', emoji: '🌊', apCost: 4, damage: 30, aoe: true, chargeGain: 2, critChance: 0.10, critMultiplier: 1.5 },
-                ],
-                special: { name: 'Cosecha del Destino', emoji: '💫', apCost: 6, damage: 59, aoe: true, chargeRequired: 5, critChance: 0.20, critMultiplier: 2 },
-            },
-        },
-    },
-
     // ===== MAGO (Báculo) =====
     // Ataque 1 (Misil Mágico) otorga carga de AMPLIFICACIÓN ARCANA (máx 3);
     // cada carga suma +25% daño y una probabilidad (20%/carga) de rebotar a
@@ -436,57 +322,67 @@ const WEAPON_ATTACKS = {
         },
     },
 
-    // ===== TANQUE (Espada y Escudo) =====
+    // ===== TANQUE (Martillo y Escudo) =====
+    // Sistema de RESISTENCIA: Martillazo (Ataque 1) otorga 1 carga (máx 3),
+    // activa mientras se mantenga (+5% bloqueo y +10% armadura por carga,
+    // ver Player.getTanqueArmorBonusPercent y Combat.performEnemyAttack).
+    // Golpe de Escudo (Ataque 2) consume TODAS las cargas para más daño y un
+    // escudo (HP que absorbe daño antes que la vida real, ver
+    // Player.absorbDamage) + Taunt de 3 turnos. El Ataque 3 de cada Tier
+    // otorga su propio escudo único (grantsShield), reemplazando cualquier
+    // escudo activo. maxHpDamageCoeff en Martillazo sigue el diseño "6 +
+    // Vida_Máxima × 0.01" (coeficiente constante en los 7 tiers; solo la
+    // base plana escala por Tier).
     tanque: {
         tiers: {
             1: {
                 basic: [
-                    { name: 'Espadazo', emoji: '🗡️', apCost: 3, damage: 7, chargeGain: 1 },
-                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 10, chargeGain: 2 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 6, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 10, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida', emoji: '💥', apCost: 6, damage: 15, chargeRequired: 3 },
+                special: { name: 'Bastión de Bronce', emoji: '🛡️', apCost: 6, damage: 8, grantsShield: { percent: 0.50, turns: 2, armorBonusPercent: 0.20 } },
             },
             2: {
                 basic: [
-                    { name: 'Espadazo', emoji: '🗡️', apCost: 3, damage: 9, chargeGain: 1 },
-                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 14, chargeGain: 2 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 7.7, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 14, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida', emoji: '💥', apCost: 6, damage: 20, chargeRequired: 3 },
+                special: { name: 'Fortaleza de Hierro', emoji: '🛡️', apCost: 6, damage: 12, grantsShield: { percent: 0.60, turns: 3, armorBonusPercent: 0.25, enemyDmgReducePercent: 0.10 } },
             },
             3: {
                 basic: [
-                    { name: 'Espadazo', emoji: '🗡️', apCost: 3, damage: 12, chargeGain: 1 },
-                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 18, chargeGain: 2 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 10.3, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 18, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida', emoji: '💥', apCost: 6, damage: 26, chargeRequired: 3 },
+                special: { name: 'Muralla de Acero', emoji: '🛡️', apCost: 6, damage: 16, critChance: 0.01, grantsShield: { percent: 0.65, turns: 3, armorBonusPercent: 0.30, reflectPercent: 0.15 } },
             },
             4: {
                 basic: [
-                    { name: 'Espadazo Infernal', emoji: '🔥', apCost: 3, damage: 15, chargeGain: 1, burn: { dmg: 1, turns: 2 } },
-                    { name: 'Golpe de Escudo Infernal', emoji: '🔥', apCost: 4, damage: 22, chargeGain: 2, burn: { dmg: 1, turns: 2 } },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 12.9, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 22, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida Ígnea', emoji: '🌋', apCost: 6, damage: 33, chargeRequired: 4, burn: { dmg: 2, turns: 3 } },
+                special: { name: 'Escudo Infernal', emoji: '🔥', apCost: 6, damage: 20, grantsShield: { percent: 0.70, turns: 3, armorBonusPercent: 0.35, burnAttacker: { dmg: 2, turns: 2 } } },
             },
             5: {
                 basic: [
-                    { name: 'Espadazo Mithril', emoji: '✨', apCost: 3, damage: 19, chargeGain: 1 },
-                    { name: 'Golpe de Escudo Mithril', emoji: '✨', apCost: 4, damage: 28, chargeGain: 2 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 16.3, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 28, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida Radiante', emoji: '⚡', apCost: 6, damage: 41, chargeRequired: 4, defenseDownFlat: 1.5, defenseDownTurns: 1 },
+                special: { name: 'Bulwark Estelar', emoji: '✨', apCost: 6, damage: 24, critChance: 0.01, grantsShield: { percent: 0.75, turns: 3, armorBonusPercent: 0.40, healPercentPerTurn: 0.03 } },
             },
             6: {
                 basic: [
-                    { name: 'Espadazo Celestial', emoji: '🌟', apCost: 3, damage: 24, chargeGain: 1, heal: 2 },
-                    { name: 'Golpe de Escudo Celestial', emoji: '🌟', apCost: 4, damage: 34, chargeGain: 2, heal: 3 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 20.6, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 34, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida Celestial', emoji: '🌠', apCost: 6, damage: 51, chargeRequired: 5, heal: 5 },
+                special: { name: 'Defensa Divina', emoji: '🙏', apCost: 6, damage: 28, critChance: 0.01, grantsShield: { percent: 0.80, turns: 4, armorBonusPercent: 0.45, blockBonusPercent: 0.10, enemyStatsDownPercent: 0.10 } },
             },
             7: {
                 basic: [
-                    { name: 'Espadazo Perfecto', emoji: '🗡️', apCost: 3, damage: 29, chargeGain: 1, critChance: 0.10, critMultiplier: 1.5 },
-                    { name: 'Golpe de Escudo Perfecto', emoji: '🛡️', apCost: 4, damage: 42, chargeGain: 2, critChance: 0.10, critMultiplier: 1.5 },
+                    { name: 'Martillazo', emoji: '🔨', apCost: 2, damage: 24.9, maxHpDamageCoeff: 0.01, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Golpe de Escudo', emoji: '🛡️', apCost: 4, damage: 42, chargeGain: 2, consumesClassCharge: true, critChance: 0.01 },
                 ],
-                special: { name: 'Embestida del Destino', emoji: '☄️', apCost: 6, damage: 63, chargeRequired: 5, critChance: 0.20, critMultiplier: 2 },
+                special: { name: 'Barrera Absoluta', emoji: '☄️', apCost: 6, damage: 32, grantsShield: { percent: 0.90, turns: 4, armorBonusPercent: 0.50, blockBonusPercent: 0.15, dodgeBonusChance: 0.20 } },
             },
         },
     },

@@ -1,6 +1,6 @@
 // ===== SISTEMA DE ENCANTAMIENTOS =====
-// 28 encantamientos (7 generales, aplicables a cualquier arma de combate
-// crafteada + 3 específicos por cada una de las 7 categorías de arma), cada
+// 22 encantamientos (7 generales, aplicables a cualquier arma de combate
+// crafteada + 3 específicos por cada una de las 5 categorías de arma), cada
 // uno con hasta 4 niveles. Solo se pueden encantar ARMAS CRAFTEADAS (el
 // arma "automática" por nivel no tiene Rareza propia, ver player.js), y el
 // Tanque solo tiene acceso a los 7 generales (no hay categoría específica
@@ -224,59 +224,6 @@ const ENCHANTS_SPECIFIC = {
             ],
         },
     ],
-    martillo: [
-        {
-            id: 'reparacion_divina', name: 'Reparación Divina', emoji: '🔧', maxLevel: 3,
-            levels: [
-                { desc: 'Restauras 5 HP por golpe a ti mismo', effects: { onHitHeal: 5 } },
-                { desc: 'Restauras 8 HP por golpe + curas debuffs cada 3 ataques', effects: { onHitHeal: 8 } },
-                { desc: 'Restauras 10 HP por golpe + curas todos los debuffs + escudo absorbente (absorbe daño)', effects: { onHitHeal: 10, damageReducePercent: 0.10 } },
-            ],
-        },
-        {
-            id: 'forja_magica', name: 'Forja Mágica', emoji: '🌟', maxLevel: 3,
-            levels: [
-                { desc: 'Tu siguiente ataque hace 130% daño (recarga cada 3 turnos)', effects: { dmgBonusPercent: 0.10 } },
-                { desc: 'Siguiente ataque 160% daño (recarga cada 2 turnos + ilumina aumentando crítico)', effects: { dmgBonusPercent: 0.20, critChanceBonus: 0.10 } },
-                { desc: 'Siguiente ataque 200% daño (recarga cada turno + ilumina + +2 PA siguiente turno)', effects: { dmgBonusPercent: 0.35, critChanceBonus: 0.15, paRestoreOnHit: 1 } },
-            ],
-        },
-        {
-            id: 'choque_magnetico', name: 'Choque Magnético', emoji: '⚡', maxLevel: 3,
-            levels: [
-                { desc: '15% chance de generar escudo magnético (+5 defensa x 2 turnos)', effects: { flatDefenseBonus: 3 } },
-                { desc: '20% chance de escudo más fuerte (+10 defensa x 3 turnos + refleja daño)', effects: { flatDefenseBonus: 6, counterChance: 0.10, counterDamagePercent: 0.20 } },
-                { desc: '25% chance de escudo supremo (+15 defensa x 4 turnos + refleja 20% del daño + aumenta defensa de aliados)', effects: { flatDefenseBonus: 9, counterChance: 0.15, counterDamagePercent: 0.30 } },
-            ],
-        },
-    ],
-    azada: [
-        {
-            id: 'cosecha_abundante', name: 'Cosecha Abundante', emoji: '🌾', maxLevel: 4,
-            levels: [
-                { desc: '15% chance de golpear +1 enemigo adicional', effects: { chain: { chance: 0.15, count: 1, damagePercent: 1.0 } } },
-                { desc: '20% chance de golpear +2 enemigos (100% daño cada uno)', effects: { chain: { chance: 0.20, count: 2, damagePercent: 1.0 } } },
-                { desc: '25% chance de golpear +3 enemigos (120% daño) + reduce defensa de todos', effects: { chain: { chance: 0.25, count: 3, damagePercent: 1.2 }, defenseDownOnHit: { percent: 0.10, turns: 1, chance: 1 } } },
-                { desc: '30% chance de golpear +4 enemigos (150% daño) + reduce defensa y daño de todos', effects: { chain: { chance: 0.30, count: 4, damagePercent: 1.5 }, defenseDownOnHit: { percent: 0.15, turns: 1, chance: 1 }, enemyDmgDownOnHit: { percent: 0.10, turns: 1, chance: 1 } } },
-            ],
-        },
-        {
-            id: 'maldicion_oscura', name: 'Maldición Oscura', emoji: '🌑', maxLevel: 3,
-            levels: [
-                { desc: '20% chance de maldecir al enemigo (reduce stats en 10% x 2 turnos)', effects: { defenseDownOnHit: { percent: 0.10, turns: 2, chance: 0.20 }, enemyDmgDownOnHit: { percent: 0.10, turns: 2, chance: 0.20 } } },
-                { desc: '25% chance de maldición mayor (reduce stats en 15% x 3 turnos + reduce regeneración)', effects: { defenseDownOnHit: { percent: 0.15, turns: 3, chance: 0.25 }, enemyDmgDownOnHit: { percent: 0.15, turns: 3, chance: 0.25 } } },
-                { desc: '30% chance de maldición total (reduce stats en 20% x 4 turnos + silencia habilidades especiales + anula bonificaciones)', effects: { defenseDownOnHit: { percent: 0.20, turns: 4, chance: 0.30 }, enemyDmgDownOnHit: { percent: 0.20, turns: 4, chance: 0.30 } } },
-            ],
-        },
-        {
-            id: 'bonificacion_multiples', name: 'Bonificación por Múltiples', emoji: '📈', maxLevel: 3,
-            levels: [
-                { desc: 'Cada enemigo golpeado en combo aumenta daño en 10% (hasta 3)', effects: { dmgBonusPercent: 0.10 } },
-                { desc: 'Cada enemigo aumenta daño en 15% (hasta 5)', effects: { dmgBonusPercent: 0.15 } },
-                { desc: 'Cada enemigo aumenta daño en 20% (hasta 8) + crítico automático al máximo + restaura 1 PA', effects: { dmgBonusPercent: 0.20, critChanceBonus: 0.15, paRestoreOnHit: 1 } },
-            ],
-        },
-    ],
     baculo: [
         {
             id: 'amplificacion_arcana', name: 'Amplificación Arcana', emoji: '📚', maxLevel: 4,
@@ -311,7 +258,7 @@ const ENCHANTS_SPECIFIC = {
 // generales, y el Desarmado nunca es un objeto crafteado (no se encanta).
 const WEAPON_ENCHANT_CATEGORY = {
     picaro: 'daga', guerrero: 'claymore', arquero: 'arco',
-    barbaro: 'hacha', herrero: 'martillo', segador: 'azada', mago: 'baculo',
+    barbaro: 'hacha', mago: 'baculo',
 };
 
 // Devuelve { general, specific } para la profesión de un arma crafteada.

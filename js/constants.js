@@ -69,8 +69,55 @@ const TILE_SIZE = 40;
 // que sube con toda la XP ganada (combate, recolección, encantamiento) y
 // determina el tier de TODAS las armas/armadura por igual.
 const MAX_LEVEL = 1000;
-const XP_PER_LEVEL = 100;
 const STAT_POINTS_PER_LEVEL = 10; // puntos de estadística otorgados en cada level up
+
+// ----- XP REQUERIDO POR NIVEL (dificultad escalante) -----
+// XP_Requerido_Nivel = 100 × Multiplicador_Rango × Nivel^1.2, donde "Nivel"
+// es el nivel AL QUE SE SUBE (ej. "Nivel 50→51" usa Nivel=51). El Rango
+// (0-indexado) agrupa de a 100 niveles y sube el multiplicador +0.5 cada
+// uno: Rango 0 (niveles 1-100) = x1.0, Rango 1 (101-200) = x1.5, ...,
+// Rango 9 (901-1000) = x5.5. _xpFormulaForLevel es la fórmula "cruda", sin
+// la excepción del Nivel 1000 (para poder usarla al precalcular el total).
+function _xpFormulaForLevel(level) {
+    const rango = Math.floor((level - 1) / 100);
+    const rangoMult = 1.0 + rango * 0.5;
+    return Math.round(100 * rangoMult * Math.pow(level, 1.2));
+}
+
+// Precalculado una sola vez al cargar el script: suma del XP requerido para
+// las 998 transiciones de Nivel 1 a Nivel 999 (Nivel 2 hasta Nivel 999; no
+// existe una transición "a" Nivel 1, ahí arranca el jugador). El Nivel 1000
+// exige exactamente este mismo total (ver getXPRequiredForLevel más abajo),
+// haciendo del último nivel el salto más difícil del juego por lejos.
+const TOTAL_XP_LEVELS_1_TO_999 = (() => {
+    let total = 0;
+    for (let level = 2; level <= 999; level++) total += _xpFormulaForLevel(level);
+    return total;
+})();
+
+function getXPRequiredForLevel(level) {
+    if (level >= MAX_LEVEL) return TOTAL_XP_LEVELS_1_TO_999;
+    return _xpFormulaForLevel(level);
+}
+
+// ----- XP OTORGADO POR ENEMIGO -----
+// XP_por_enemigo = 10 × Piso × Multiplicador_Rareza × Escala_Minijefe_Jefe.
+// XP_RARITY_MULT es una escala PROPIA para XP (distinta del `.mult` de
+// MONSTER_RARITIES, que se usa para daño/vida de combate). "Jefe de Piso"
+// (x3.0) cubre tanto al jefe dinámico (BOSS_TIERS.jefe) como al jefe
+// generado al crear el piso (jefe_especial/jefe_aleatorio, ver
+// grid-dungeon.js) — el diseño solo distingue 4 categorías, no 5.
+const XP_RARITY_MULT = {
+    comun: 1.0, poco_comun: 1.2, raro: 1.4, epico: 1.6, legendario: 1.8, mitico: 2.0,
+};
+const BOSS_XP_SCALE = {
+    minijefe: 2.0, jefe: 3.0, jefe_especial: 3.0, jefe_aleatorio: 3.0, jefe_final: 5.0,
+};
+function getEnemyXPReward(floor, rarityId, bossKind) {
+    const rarityMult = XP_RARITY_MULT[rarityId] || 1.0;
+    const bossMult = BOSS_XP_SCALE[bossKind] || 1.0;
+    return Math.round(10 * floor * rarityMult * bossMult);
+}
 
 const SAVE_KEY = 'rpg_weapon_progression_save_v3';
 
@@ -108,23 +155,21 @@ function getTierProgress(level) {
     return { tier, into, span };
 }
 
-// ----- PROFESIONES (13) -----
+// ----- PROFESIONES (11) -----
 // type: combat | combat_ranged | combat_block | gather | passive | craft
 // Las profesiones de tipo "gather" nunca se equipan: suben de nivel y están
 // siempre disponibles para recolectar, sin importar el arma de combate activa.
 const PROFESSIONS = [
     { id: 'picaro',     name: 'PÍCARO',     emoji: '🗡️', type: 'combat',        weaponLabel: 'Daga',              desc: 'Alta probabilidad de crítico, penetración de armadura', baseDamage: 9 },
     { id: 'guerrero',   name: 'GUERRERO',   emoji: '⚔️', type: 'combat',        weaponLabel: 'Espada',            desc: 'Daño muy alto, acumula Poder',    baseDamage: 16 },
-    { id: 'herrero',    name: 'HERRERO',    emoji: '🪛', type: 'combat',        weaponLabel: 'Martillo',          desc: 'Herramienta y arma',              baseDamage: 10 },
     { id: 'barbaro',    name: 'BÁRBARO',    emoji: '🪓', type: 'combat',        weaponLabel: 'Hacha de Batalla',  desc: 'Daño medio-alto, Sed de Sangre',  baseDamage: 13 },
     { id: 'mago',       name: 'MAGO',       emoji: '🧙', type: 'combat',        weaponLabel: 'Báculo',            desc: 'Amplificación Arcana a distancia', baseDamage: 12 },
     { id: 'lenador',    name: 'LEÑADOR',    emoji: '🌲', type: 'gather',        weaponLabel: 'Hacha de Leña',     desc: 'Recolección: madera',             baseDamage: 6,  resource: 'tree' },
     { id: 'arquero',    name: 'ARQUERO',    emoji: '🏹', type: 'combat_ranged', weaponLabel: 'Arco',              desc: 'Requiere flechas, sistema de Enfoque', baseDamage: 8,  range: 320 },
     { id: 'minero',     name: 'MINERO',     emoji: '⛏️', type: 'gather',        weaponLabel: 'Pico',              desc: 'Recolección: minerales',          baseDamage: 6,  resource: 'rock' },
-    { id: 'segador',    name: 'SEGADOR',    emoji: '🌾', type: 'combat',        weaponLabel: 'Azada de Guerra',   desc: 'Daño bajo-medio',                 baseDamage: 8 },
     { id: 'campesino',  name: 'CAMPESINO',  emoji: '👨‍🌾', type: 'gather',      weaponLabel: 'Azada',             desc: 'Recolección: cultivos',           baseDamage: 6,  resource: 'plant' },
     { id: 'armadura',   name: 'ARMADURA',   emoji: '🛡️', type: 'passive',      weaponLabel: 'Armadura',          desc: 'Defensa pasiva',                  baseDamage: 0 },
-    { id: 'tanque',     name: 'TANQUE',     emoji: '🛡️', type: 'combat_block', weaponLabel: 'Espada y Escudo',   desc: 'Máxima defensa',                  baseDamage: 6 },
+    { id: 'tanque',     name: 'TANQUE',     emoji: '🔨', type: 'combat_block', weaponLabel: 'Martillo y Escudo', desc: 'Defensa y control, sistema de Resistencia', baseDamage: 6 },
     { id: 'encantador', name: 'ENCANTADOR', emoji: '✨', type: 'craft',         weaponLabel: 'Libro Mágico',      desc: 'Mejorador de equipamiento',       baseDamage: 0 },
     { id: 'desarmado',  name: 'DESARMADO',  emoji: '👊', type: 'combat',        weaponLabel: 'Puños',             desc: 'Combate sin armas: Golpe, Patada y Cabezazo', baseDamage: 5 },
 ];
@@ -167,17 +212,29 @@ const DEFAULT_COUNTER_DAMAGE_PERCENT = 0.5; // sin encantamiento de contraataque
 
 // Probabilidad de crítico BASE (inherente al tipo de arma, antes de Suerte,
 // del ataque específico o de encantamientos). Las clases sin mención en el
-// diseño (Tanque, Desarmado) no tienen bono de clase (0%).
+// diseño (Desarmado) no tienen bono de clase (0%).
 const WEAPON_CRIT_BASE = {
     arquero: 0.15,   // Arcos
     picaro: 0.12,    // Dagas
     barbaro: 0.08,   // Hachas
-    segador: 0.06,   // Azadas
     mago: 0.05,      // Báculos
-    herrero: 0.04,   // Martillos
+    tanque: 0.04,    // Martillos (Tanque)
     guerrero: 0.03,  // Claymores/Espadas
 };
 function getWeaponCritBase(profId) { return WEAPON_CRIT_BASE[profId] || 0; }
+
+// ----- EMOJIS DE INVENTARIO -----
+// El ícono de cada arma/armadura en el inventario es directamente
+// prof.emoji (ver PROFESSIONS) en vez del emoji de Tier; las monturas usan
+// el emoji genérico 🐴 (no el propio de cada montura, ver MOUNTS en
+// mounts.js) para mantener un solo ícono de categoría.
+const MOUNT_INVENTORY_EMOJI = '🐴';
+
+// Ícono por Rareza (reemplaza el texto "· Épico" en el nombre del ítem).
+const RARITY_EMOJI = {
+    comun: '⚪', poco_comun: '🟢', raro: '🔵', epico: '🟣', legendario: '🟠', mitico: '✨',
+};
+function getRarityEmoji(rarityId) { return RARITY_EMOJI[rarityId] || '⚪'; }
 
 // ----- ATAQUES POR ARMA (3 por arma de combate) -----
 // Placeholder hasta que se definan los efectos reales de cada ataque

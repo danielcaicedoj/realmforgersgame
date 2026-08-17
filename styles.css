@@ -401,6 +401,9 @@ canvas {
 }
 .apply-btn:hover { background: #7f63ee; }
 .apply-btn:disabled { opacity: 0.4; cursor: default; }
+/* Feedback visual al "presionar" un botón por teclado (ej. Espacio en la
+   ventana de Victoria, ver UI.triggerVictoryContinue), imitando :active. */
+.apply-btn.key-pressed { background: #7f63ee; transform: scale(0.95); }
 
 /* ===== Estadísticas ===== */
 .stats-points-note {
@@ -661,6 +664,26 @@ canvas {
     flex-wrap: wrap;
     gap: 6px;
     margin: 10px 0 14px;
+}
+/* El selector principal de categorías (#craft-prof-selector) se separa en 2
+   grupos verticales (Combate arriba, Recolección abajo, ver ui.js
+   renderCraft); los selectores de tier de Alimentos/Núcleos reutilizan la
+   clase .craft-prof-selector sola (sin id) para su fila simple de botones,
+   así que este layout de columna queda acotado al id específico. */
+#craft-prof-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.craft-prof-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.craft-prof-separator {
+    border: none;
+    border-top: 1px solid #3a3350;
+    margin: 2px 0;
 }
 .craft-prof-btn {
     background: #241f38;

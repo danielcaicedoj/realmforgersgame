@@ -50,10 +50,25 @@ const UI = {
         });
 
         document.getElementById('combat-endturn-btn').addEventListener('click', () => Combat.playerEndTurn());
-        document.getElementById('victory-continue-btn').addEventListener('click', () => {
-            this.hideVictoryPanel();
-            Combat.finish('victory');
-        });
+        document.getElementById('victory-continue-btn').addEventListener('click', () => this.triggerVictoryContinue());
+    },
+
+    isVictoryPanelVisible() {
+        const panel = document.getElementById('victory-panel');
+        return !!panel && !panel.classList.contains('hidden');
+    },
+
+    // Acción de "Continuar" de la ventana de Victoria: compartida por el
+    // click del botón y por la tecla Espacio (ver game.js). El propio
+    // ocultamiento del panel funciona como debounce — una vez oculto, una
+    // segunda pulsación de Espacio ya no encuentra el panel visible.
+    triggerVictoryContinue() {
+        if (!this.isVictoryPanelVisible()) return;
+        const btn = document.getElementById('victory-continue-btn');
+        btn.classList.add('key-pressed');
+        setTimeout(() => btn.classList.remove('key-pressed'), 150);
+        this.hideVictoryPanel();
+        Combat.finish('victory');
     },
 
     hidePanel(id) {
@@ -73,9 +88,10 @@ const UI = {
         this.els.profName.textContent = prof.name;
         this.els.profLevel.textContent = `LVL ${player.level}${player.level >= MAX_LEVEL ? ' (MAX)' : ''}`;
 
-        const xpPct = player.level >= MAX_LEVEL ? 100 : (player.xp / XP_PER_LEVEL) * 100;
+        const xpRequired = player.level >= MAX_LEVEL ? 0 : getXPRequiredForLevel(player.level + 1);
+        const xpPct = player.level >= MAX_LEVEL ? 100 : (player.xp / xpRequired) * 100;
         this.els.xpFill.style.width = xpPct + '%';
-        this.els.xpText.textContent = player.level >= MAX_LEVEL ? 'MAX' : `${player.xp}/${XP_PER_LEVEL}`;
+        this.els.xpText.textContent = player.level >= MAX_LEVEL ? 'MAX' : `${Math.floor(player.xp)}/${xpRequired}`;
 
         const hpPct = (player.hp / player.maxHp) * 100;
         this.els.hpFill.style.width = hpPct + '%';
@@ -153,9 +169,9 @@ const UI = {
         weaponDiv.className = 'inv-item active';
         const attacksHTML = buildAttacksHTML(activeProf.id, weaponTier.id, weaponRarity ? weaponRarity.mult : 1);
         weaponDiv.innerHTML = `
-            <div class="item-emoji">${weaponTier.emoji}</div>
+            <div class="item-emoji">${activeProf.emoji}</div>
             <div class="item-info">
-                <div class="item-name"${weaponRarity ? ` style="color:${weaponRarity.color}"` : ''}>${getWeaponName(activeProf.id, weaponTier.id)}${weaponRarity ? ` · ${weaponRarity.name}` : ''}</div>
+                <div class="item-name"${weaponRarity ? ` style="color:${weaponRarity.color}"` : ''}>${getWeaponName(activeProf.id, weaponTier.id)} · Tier ${weaponTier.id}${weaponRarity ? ` · ${getRarityEmoji(weaponRarity.id)}` : ''}</div>
                 <div class="item-sub">${activeProf.emoji} ${activeProf.name} · Nivel ${player.level} · Tier ${weaponTier.id} ${weaponTier.name}${craftedWeapon ? ' · Crafteado' : ''}</div>
                 ${attacksHTML ? `<div class="item-attacks">${attacksHTML}</div>` : ''}
             </div>
@@ -170,9 +186,9 @@ const UI = {
         const armorDiv = document.createElement('div');
         armorDiv.className = 'inv-item active';
         armorDiv.innerHTML = `
-            <div class="item-emoji">${armorTier.emoji}</div>
+            <div class="item-emoji">🛡️</div>
             <div class="item-info">
-                <div class="item-name"${armorRarity ? ` style="color:${armorRarity.color}"` : ''}>${getWeaponName('armadura', armorTier.id)}${armorRarity ? ` · ${armorRarity.name}` : ''}</div>
+                <div class="item-name"${armorRarity ? ` style="color:${armorRarity.color}"` : ''}>${getWeaponName('armadura', armorTier.id)} · Tier ${armorTier.id}${armorRarity ? ` · ${getRarityEmoji(armorRarity.id)}` : ''}</div>
                 <div class="item-sub">🛡️ ARMADURA · Nivel ${player.level} · DEF ${armorInfo.defense}${craftedArmor ? ' · Crafteado' : ''}</div>
             </div>
             <span class="passive-tag">Armadura equipada</span>
@@ -226,21 +242,21 @@ const UI = {
         bagTitle.textContent = '🎒 Bolso';
         bagSection.appendChild(bagTitle);
 
-        const resourcesTitle = document.createElement('div');
-        resourcesTitle.className = 'inv-subsection-title';
-        resourcesTitle.textContent = 'Recursos';
-        bagSection.appendChild(resourcesTitle);
+        // Un ítem es "Consumible" (poción/pergamino/alimento); todo lo demás
+        // (núcleos, mena, madera, hierba, cultivo) es "Recurso".
+        const isConsumableMaterial = id => id.startsWith('pocion_') || id === 'pergamino_teletransporte' || id.startsWith('food_');
 
-        const materialIds = Object.keys(player.materials).filter(id => player.materials[id] > 0);
-        if (materialIds.length === 0) {
-            const note = document.createElement('div');
-            note.className = 'panel-note';
-            note.textContent = 'Sin recursos recolectados.';
-            bagSection.appendChild(note);
-        } else {
+        const renderMaterialGrid = (ids, emptyText) => {
+            if (ids.length === 0) {
+                const note = document.createElement('div');
+                note.className = 'panel-note';
+                note.textContent = emptyText;
+                bagSection.appendChild(note);
+                return;
+            }
             const grid = document.createElement('div');
             grid.className = 'resource-grid';
-            materialIds.forEach(id => {
+            ids.forEach(id => {
                 const info = getMaterialInfo(id);
                 const isPotion = id.startsWith('pocion_');
                 const isScroll = id === 'pergamino_teletransporte';
@@ -256,7 +272,23 @@ const UI = {
                 grid.appendChild(chip);
             });
             bagSection.appendChild(grid);
-        }
+        };
+
+        const materialIds = Object.keys(player.materials).filter(id => player.materials[id] > 0);
+        const resourceIds = materialIds.filter(id => !isConsumableMaterial(id));
+        const consumableIds = materialIds.filter(isConsumableMaterial);
+
+        const resourcesTitle = document.createElement('div');
+        resourcesTitle.className = 'inv-subsection-title';
+        resourcesTitle.textContent = '📦 Recursos';
+        bagSection.appendChild(resourcesTitle);
+        renderMaterialGrid(resourceIds, 'Sin recursos recolectados.');
+
+        const consumablesTitle = document.createElement('div');
+        consumablesTitle.className = 'inv-subsection-title';
+        consumablesTitle.textContent = '🧪 Consumibles';
+        bagSection.appendChild(consumablesTitle);
+        renderMaterialGrid(consumableIds, 'Sin consumibles.');
 
         const itemsTitle = document.createElement('div');
         itemsTitle.className = 'inv-subsection-title';
@@ -276,9 +308,9 @@ const UI = {
             const div = document.createElement('div');
             div.className = 'inv-item' + (isEquipped ? ' active' : '');
             div.innerHTML = `
-                <div class="item-emoji">${tier.emoji}</div>
+                <div class="item-emoji">${itemProf.emoji}</div>
                 <div class="item-info">
-                    <div class="item-name" style="color:${rarity.color}">${getWeaponName(item.profId, item.tierId)} · ${rarity.name}</div>
+                    <div class="item-name" style="color:${rarity.color}">${getWeaponName(item.profId, item.tierId)} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}</div>
                     <div class="item-sub">${itemProf.emoji} ${itemProf.name} · Tier ${tier.id} ${tier.name} · ${statLabel}${isEquipped ? ' · Equipado' : ''}</div>
                 </div>
                 ${isEquipped
@@ -305,7 +337,7 @@ const UI = {
             const div = document.createElement('div');
             div.className = 'inv-item';
             div.innerHTML = `
-                <div class="item-emoji">${tier.emoji}</div>
+                <div class="item-emoji">${prof.emoji}</div>
                 <div class="item-info">
                     <div class="item-name">${getWeaponName(prof.id, tier.id)}</div>
                     <div class="item-sub">${prof.emoji} ${prof.name} · Nivel ${player.level} · Tier ${tier.id} ${tier.name}</div>
@@ -482,58 +514,51 @@ const UI = {
         }
     },
 
+    // Selector de categorías del panel de Crafteo: dos grupos visuales
+    // separados — Clases de Combate (armas/armadura/monturas) arriba y
+    // Clases de Recolección (materias primas/alimentos/pociones/núcleos)
+    // abajo, con un separador entre ambos (ver CSS .craft-prof-separator).
     renderCraft(player) {
-        if (!this._craftProf) this._craftProf = 'picaro'; // id de profesión, o '__potion__'
-        const craftableProfs = PROFESSIONS.filter(p => p.id !== 'desarmado' &&
-            (p.type === 'combat' || p.type === 'combat_ranged' || p.type === 'combat_block' || p.type === 'gather' || p.id === 'armadura'));
+        if (!this._craftProf) this._craftProf = 'picaro'; // id de profesión, o '__potion__'/'__food__'/'__mount__'/'__nucleo__'
 
         const selectorEl = document.getElementById('craft-prof-selector');
         selectorEl.innerHTML = '';
-        craftableProfs.forEach(prof => {
+
+        const makeBtn = (key, label) => {
             const btn = document.createElement('button');
-            btn.className = 'craft-prof-btn' + (prof.id === this._craftProf ? ' active' : '');
-            btn.innerHTML = `${prof.emoji} ${prof.name}`;
+            btn.className = 'craft-prof-btn' + (key === this._craftProf ? ' active' : '');
+            btn.innerHTML = label;
             btn.addEventListener('click', () => {
-                this._craftProf = prof.id;
+                this._craftProf = key;
                 this.renderCraft(player);
             });
-            selectorEl.appendChild(btn);
-        });
-        const potionBtn = document.createElement('button');
-        potionBtn.className = 'craft-prof-btn' + (this._craftProf === '__potion__' ? ' active' : '');
-        potionBtn.innerHTML = '🧪 POCIONES';
-        potionBtn.addEventListener('click', () => {
-            this._craftProf = '__potion__';
-            this.renderCraft(player);
-        });
-        selectorEl.appendChild(potionBtn);
+            return btn;
+        };
 
-        const foodBtn = document.createElement('button');
-        foodBtn.className = 'craft-prof-btn' + (this._craftProf === '__food__' ? ' active' : '');
-        foodBtn.innerHTML = '🍽️ ALIMENTOS';
-        foodBtn.addEventListener('click', () => {
-            this._craftProf = '__food__';
-            this.renderCraft(player);
+        const combatGroup = document.createElement('div');
+        combatGroup.className = 'craft-prof-group';
+        ['picaro', 'guerrero', 'barbaro', 'mago', 'arquero', 'tanque', 'armadura'].forEach(id => {
+            const prof = getProfession(id);
+            if (prof) combatGroup.appendChild(makeBtn(prof.id, `${prof.emoji} ${prof.name}`));
         });
-        selectorEl.appendChild(foodBtn);
+        combatGroup.appendChild(makeBtn('__mount__', '🐴 MONTURAS'));
+        selectorEl.appendChild(combatGroup);
 
-        const mountBtn = document.createElement('button');
-        mountBtn.className = 'craft-prof-btn' + (this._craftProf === '__mount__' ? ' active' : '');
-        mountBtn.innerHTML = '🐴 MONTURAS';
-        mountBtn.addEventListener('click', () => {
-            this._craftProf = '__mount__';
-            this.renderCraft(player);
-        });
-        selectorEl.appendChild(mountBtn);
+        const separator = document.createElement('div');
+        separator.className = 'craft-prof-separator';
+        selectorEl.appendChild(separator);
 
-        const nucleoBtn = document.createElement('button');
-        nucleoBtn.className = 'craft-prof-btn' + (this._craftProf === '__nucleo__' ? ' active' : '');
-        nucleoBtn.innerHTML = '💠 NÚCLEOS';
-        nucleoBtn.addEventListener('click', () => {
-            this._craftProf = '__nucleo__';
-            this.renderCraft(player);
+        const gatherGroup = document.createElement('div');
+        gatherGroup.className = 'craft-prof-group';
+        const GATHER_BTN_EMOJI = { lenador: '🪵' }; // override puntual solo para este selector (ver PROFESSIONS para el emoji "oficial")
+        ['lenador', 'minero', 'campesino'].forEach(id => {
+            const prof = getProfession(id);
+            if (prof) gatherGroup.appendChild(makeBtn(prof.id, `${GATHER_BTN_EMOJI[id] || prof.emoji} ${prof.name}`));
         });
-        selectorEl.appendChild(nucleoBtn);
+        gatherGroup.appendChild(makeBtn('__food__', '🥘 ALIMENTOS'));
+        gatherGroup.appendChild(makeBtn('__potion__', '💊 POCIONES'));
+        gatherGroup.appendChild(makeBtn('__nucleo__', '💎 NÚCLEOS'));
+        selectorEl.appendChild(gatherGroup);
 
         const listEl = document.getElementById('craft-list');
         listEl.innerHTML = '';
@@ -803,9 +828,9 @@ const UI = {
                 const ownedRow = document.createElement('div');
                 ownedRow.className = 'inv-item' + (isEquipped ? ' active' : '');
                 ownedRow.innerHTML = `
-                    <div class="item-emoji">${def.emoji}</div>
+                    <div class="item-emoji">${MOUNT_INVENTORY_EMOJI}</div>
                     <div class="item-info">
-                        <div class="item-name" style="color:${rarity.color}">${def.name} · ${rarity.name}</div>
+                        <div class="item-name" style="color:${rarity.color}">${def.name} · Tier ${tierId} · ${getRarityEmoji(rarity.id)}</div>
                         <div class="item-sub">🏃 +${m.speedPercent}% velocidad${isEquipped ? ' · Equipada' : ''}</div>
                     </div>
                     ${isEquipped
@@ -953,12 +978,16 @@ const UI = {
         const player = combat.player;
         const prof = player.getActiveProfessionDef();
         const hpPct = Math.max(0, (player.hp / player.maxHp) * 100);
+        const shieldTag = player.shield ? ` · 🛡️+${Math.round(player.shield.amount)} (${player.shield.turnsLeft}t)` : '';
+        const resistenciaCharges = combat.classCharge.prof === 'tanque' ? combat.classCharge.count : 0;
+        const resistenciaTag = resistenciaCharges > 0 ? ` · 🔰x${resistenciaCharges}` : '';
+        const tauntTag = combat.tauntTurnsLeft > 0 ? ` · 😤Taunt (${combat.tauntTurnsLeft}t)` : '';
         playerEl.innerHTML = `
             <div class="combat-enemy-emoji">🟣</div>
             <div class="combat-player-info">
                 <div class="combat-enemy-name">${prof.emoji} ${prof.name} (Tú)</div>
                 <div class="mini-bar-track"><div class="mini-bar-fill hp-fill" style="width:${hpPct}%"></div></div>
-                <div class="combat-hp-text">${Math.round(player.hp)}/${player.maxHp} HP</div>
+                <div class="combat-hp-text">${Math.round(player.hp)}/${player.maxHp} HP${shieldTag}${resistenciaTag}${tauntTag}</div>
             </div>
         `;
 
@@ -1104,6 +1133,22 @@ const UI = {
         pointsDiv.className = 'panel-note stats-points-note';
         pointsDiv.innerHTML = `<b style="color:#ffd27a">${player.statPoints}</b> puntos disponibles · Nivel ${player.level}`;
         list.appendChild(pointsDiv);
+
+        // Info de dificultad de XP: Rango actual (1-indexado para mostrar,
+        // 0-indexado en la fórmula, ver constants.js) y una estimación de
+        // cuántos enemigos Comunes normales del piso actual hacen falta
+        // para completar el nivel en curso.
+        if (player.level < MAX_LEVEL) {
+            const rango = Math.floor((player.level - 1) / 100);
+            const xpRequired = getXPRequiredForLevel(player.level + 1);
+            const xpRemaining = Math.max(0, xpRequired - player.xp);
+            const avgEnemyXP = getEnemyXPReward(player.floor, 'comun', undefined) || 1;
+            const enemiesNeeded = Math.ceil(xpRemaining / avgEnemyXP);
+            const difficultyDiv = document.createElement('div');
+            difficultyDiv.className = 'panel-note stats-points-note';
+            difficultyDiv.innerHTML = `Rango <b style="color:#ffd27a">${rango + 1}</b> de 10 · ~<b style="color:#ffd27a">${enemiesNeeded}</b> enemigos comunes del piso ${player.floor} para subir de nivel`;
+            list.appendChild(difficultyDiv);
+        }
 
         const STAT_DEFS = [
             { id: 'potencia', name: 'Potencia', emoji: '💪', desc: '+0.1% de daño de arma por punto (multiplicativo)' },
