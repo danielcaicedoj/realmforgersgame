@@ -14,7 +14,17 @@
 
     let player;
     let dungeon;
-    let portals = []; // [{ x, y, radius, esquina, destino }] las 4 esquinas del mapa
+    let currentBiome = null; // tema visual del piso actual (ver BIOME_THEMES en constants.js)
+    let spawnZones = []; // zonas de spawn incrementado activas en el piso actual (ver SISTEMA DE ZONAS DE SPAWN)
+    // Taberna (ver SISTEMA DE TABERNA): piso especial sin enemigos/peligros,
+    // accesible desde la ventana de Pisos (tecla P). floorBeforeTaberna vive
+    // solo en memoria — igual que player.floor, nunca se persiste entre
+    // sesiones (cada sesión arranca siempre en el Piso 1, fuera de Taberna).
+    let inTaberna = false;
+    let floorBeforeTaberna = null;
+    let portals = []; // [{ x, y, radius, esquina, destino, tipo }] 4 esquinas ('siguiente') + 1 central ('anterior', piso>1)
+    let portalsCercaHint = new Set(); // índices de portales cuyo mensaje "Portal al Piso N" ya se mostró (evita spam mientras el jugador se queda cerca)
+    let portalCooldownUntil = 0; // gate breve tras cada loadFloor: el spawn del jugador puede caer justo sobre el portal central del piso nuevo
     let enemies = [];
     let nodes = [];
     let resourceZones = []; // [{ type, x, y }] centros de las zonas densas de recursos, para el minimapa
@@ -52,7 +62,11 @@
         player = new Player();
         Combat.onKillHook = handleEnemyKilled;
         UI.onUseTeleportScroll = requestTeleport;
+        UI.onUseAlteracionScroll = useAlteracionScroll;
         UI.onTeleportToFloor = teleportToFloor;
+        UI.onEnterTaberna = enterTaberna;
+        UI.onExitTaberna = exitTaberna;
+        UI.onConfirmBossTeleport = teleportToFinalBoss;
         loadFloor(player.floor);
         bindInput();
         window.addEventListener('resize', () => {
@@ -97,10 +111,20 @@
         resourceZones.forEach(z => {
             minimapCtx.fillText(RESOURCE_TYPES[z.type].emoji, z.x * scaleX, z.y * scaleY);
         });
-        minimapCtx.font = '11px sans-serif';
         enemies.forEach(en => {
-            if (en.alive && en.type.isBoss) minimapCtx.fillText(en.type.emoji, en.x * scaleX, en.y * scaleY);
+            if (!en.alive || !en.type.isBoss) return;
+            if (en.type.isFinalBoss) {
+                minimapCtx.font = 'bold 15px sans-serif';
+                minimapCtx.fillStyle = '#ffd700';
+                minimapCtx.fillText('👑', en.x * scaleX, en.y * scaleY);
+            } else {
+                // Minijefe más chico que Jefe (de piso o dinámico) en el mapa.
+                minimapCtx.font = en.type.bossKind === 'minijefe' ? '8px sans-serif' : '11px sans-serif';
+                minimapCtx.fillText(en.type.emoji, en.x * scaleX, en.y * scaleY);
+            }
         });
+        minimapCtx.font = '11px sans-serif';
+        minimapCtx.fillStyle = '#000';
         chests.forEach(c => {
             if (!c.opened) minimapCtx.fillText(c.unlocked ? '🎁' : '🔒', c.x * scaleX, c.y * scaleY);
         });
@@ -108,9 +132,13 @@
         portals.forEach(p => {
             minimapCtx.beginPath();
             minimapCtx.arc(p.x * scaleX, p.y * scaleY, 3.5, 0, Math.PI * 2);
-            minimapCtx.fillStyle = '#c9a6ff';
+            minimapCtx.fillStyle = p.tipo === 'anterior' ? '#ffd27a' : '#c9a6ff';
             minimapCtx.fill();
         });
+
+        // Zonas de Spawn: contorno de círculo sin rellenar + indicador de
+        // tiempo restante (ver SPAWN_ZONE_* en constants.js).
+        drawSpawnZonesOnMap(minimapCtx, scaleX, scaleY, 1);
 
         minimapCtx.beginPath();
         minimapCtx.arc(player.x * scaleX, player.y * scaleY, 3, 0, Math.PI * 2);
@@ -119,6 +147,30 @@
         minimapCtx.lineWidth = 1;
         minimapCtx.strokeStyle = '#fff';
         minimapCtx.stroke();
+    }
+
+    // Dibuja las Zonas de Spawn activas como un círculo de color sin
+    // rellenar (contorno) + el tiempo restante en minutos, reutilizado
+    // tanto por el minimapa como por el mapa ampliado (ver drawMinimap /
+    // drawBigMap). `scale` ajusta grosor de línea y tamaño de texto según
+    // la superficie (el mapa ampliado es mucho más grande que el minimapa).
+    function drawSpawnZonesOnMap(mapCtx, scaleX, scaleY, scale) {
+        const now = Date.now();
+        spawnZones.forEach(zone => {
+            const cx = zone.x * scaleX, cy = zone.y * scaleY;
+            mapCtx.beginPath();
+            mapCtx.arc(cx, cy, zone.radius * scaleX, 0, Math.PI * 2);
+            mapCtx.lineWidth = 1.5 * scale;
+            mapCtx.strokeStyle = zone.color;
+            mapCtx.stroke();
+
+            const minutesLeft = Math.max(0, Math.ceil((zone.expiresAt - now) / 60000));
+            mapCtx.font = `bold ${Math.round(9 * scale)}px sans-serif`;
+            mapCtx.fillStyle = zone.color;
+            mapCtx.textAlign = 'center';
+            mapCtx.textBaseline = 'middle';
+            mapCtx.fillText(`${minutesLeft}m`, cx, cy);
+        });
     }
 
     // Versión ampliada del minimapa, mostrada en el panel de mapa (tecla M).
@@ -135,10 +187,20 @@
         resourceZones.forEach(z => {
             mapLargeCtx.fillText(RESOURCE_TYPES[z.type].emoji, z.x * scaleX, z.y * scaleY);
         });
-        mapLargeCtx.font = '20px sans-serif';
         enemies.forEach(en => {
-            if (en.alive && en.type.isBoss) mapLargeCtx.fillText(en.type.emoji, en.x * scaleX, en.y * scaleY);
+            if (!en.alive || !en.type.isBoss) return;
+            if (en.type.isFinalBoss) {
+                mapLargeCtx.font = 'bold 26px sans-serif';
+                mapLargeCtx.fillStyle = '#ffd700';
+                mapLargeCtx.fillText('👑', en.x * scaleX, en.y * scaleY);
+            } else {
+                // Minijefe más chico que Jefe (de piso o dinámico) en el mapa.
+                mapLargeCtx.font = en.type.bossKind === 'minijefe' ? '14px sans-serif' : '20px sans-serif';
+                mapLargeCtx.fillText(en.type.emoji, en.x * scaleX, en.y * scaleY);
+            }
         });
+        mapLargeCtx.font = '20px sans-serif';
+        mapLargeCtx.fillStyle = '#000';
         chests.forEach(c => {
             if (!c.opened) mapLargeCtx.fillText(c.unlocked ? '🎁' : '🔒', c.x * scaleX, c.y * scaleY);
         });
@@ -146,9 +208,11 @@
         portals.forEach(p => {
             mapLargeCtx.beginPath();
             mapLargeCtx.arc(p.x * scaleX, p.y * scaleY, 7, 0, Math.PI * 2);
-            mapLargeCtx.fillStyle = '#c9a6ff';
+            mapLargeCtx.fillStyle = p.tipo === 'anterior' ? '#ffd27a' : '#c9a6ff';
             mapLargeCtx.fill();
         });
+
+        drawSpawnZonesOnMap(mapLargeCtx, scaleX, scaleY, 2.4);
 
         mapLargeCtx.beginPath();
         mapLargeCtx.arc(player.x * scaleX, player.y * scaleY, 6, 0, Math.PI * 2);
@@ -207,6 +271,14 @@
         dungeon = generateDungeon(floorNum);
         buildMinimapStatic();
 
+        // Temática de bioma por Tier (ver BIOME_THEMES en constants.js):
+        // el "terreno" (piso) se pinta como fondo de la página, que es lo
+        // que se ve a través de los tiles de piso (transparentes en el
+        // canvas — ver renderWallsGrid en grid-dungeon.js); la
+        // "iluminación" se aplica como un tinte ambiental en render().
+        currentBiome = dungeon.biome;
+        document.body.style.background = currentBiome.floorColor;
+
         // El jugador siempre aparece en el centro exacto del mapa (ver
         // POSICION_JUGADOR_INICIO en grid-dungeon.js), no en una sala.
         player.x = dungeon.posicionJugadorInicio.x;
@@ -234,6 +306,11 @@
                 resourceZones.push({ type, x: center.x, y: center.y });
             }
         });
+
+        // Zonas de spawn incrementado (ver SPAWN_ZONE_* en constants.js):
+        // ninguna al arrancar el piso, se van creando con el tiempo (chance
+        // chica por cada enemigo derrotado, ver handleEnemyKilled).
+        spawnZones = [];
 
         // El piso arranca por debajo del cap; el respawn dinámico (al matar
         // enemigos) va rellenando el resto con el tiempo.
@@ -266,13 +343,74 @@
             for (let g = 0; g < CHEST_GUARD_INITIAL; g++) spawnChestGuard(chest);
         }
 
-        // 4 portales fijos en las esquinas del mapa (ver generarPortales en
-        // grid-dungeon.js): arriba-izq = piso anterior, arriba-der = piso
-        // siguiente, abajo-izq = reset a piso 1, abajo-der = piso aleatorio
-        // (no hay menú principal en este juego).
-        portals = dungeon.portales.map(p => ({ x: p.posicion.x, y: p.posicion.y, radius: 28, esquina: p.esquina, destino: p.destino }));
+        // Portales (ver generarPortales en grid-dungeon.js): 4 fijos en las
+        // esquinas del mapa (piso siguiente) + 1 central en el spawn del
+        // jugador (piso anterior, ausente en el Piso 1).
+        portals = dungeon.portales.map(p => ({ x: p.posicion.x, y: p.posicion.y, radius: 28, esquina: p.esquina, destino: p.destino, tipo: p.tipo }));
+        portalsCercaHint = new Set();
+        // El portal central cae exactamente sobre el spawn del jugador: sin
+        // este respiro, el auto-teleport lo dispararía apenas carga el piso.
+        portalCooldownUntil = Date.now() + 800;
 
         UI.updateFloorHUD(floorNum, enemies.filter(e => e.alive).length, finalBossAlive);
+    }
+
+    // ----- TABERNA (piso especial, ver generarTaberna en grid-dungeon.js) -----
+    // Sin enemigos/cofres/nodos/zonas/portales: todos esos arrays quedan
+    // vacíos, así que el resto del loop (combate, recolección, spawn
+    // dinámico) queda inerte sin necesitar guardas especiales.
+    function loadTaberna() {
+        dungeon = generarTaberna();
+        buildMinimapStatic();
+
+        currentBiome = dungeon.biome;
+        document.body.style.background = currentBiome.floorColor;
+
+        player.x = dungeon.posicionJugadorInicio.x;
+        player.y = dungeon.posicionJugadorInicio.y;
+        updateCamera();
+
+        nodes = [];
+        resourceZones = [];
+        spawnZones = [];
+        enemies = [];
+        finalBossAlive = false;
+        chests = [];
+        opening = null;
+        gathering = null;
+        portals = [];
+        portalsCercaHint = new Set();
+
+        UI.updateFloorHUD(null, 0, false);
+    }
+
+    // Entra a la Taberna desde cualquier piso (ver ventana de Pisos, tecla
+    // P): no consume Pergaminos, no cuenta como "visitar" un piso nuevo
+    // (maxFloorReached no cambia) y es inmediato.
+    function enterTaberna() {
+        if (inTaberna || dead || Combat.active) return;
+        floorBeforeTaberna = player.floor;
+        UI.hidePanel('floors-panel');
+        UI.playTeleportFade(() => {
+            inTaberna = true;
+            loadTaberna();
+            UI.showLevelToastText('🍺 Bienvenido a la Taberna');
+        });
+    }
+
+    // Vuelve exactamente al piso donde estaba antes de entrar (se
+    // regenera desde cero, como cualquier otro cambio de piso).
+    function exitTaberna() {
+        if (!inTaberna || dead || Combat.active) return;
+        const returnFloor = floorBeforeTaberna || 1;
+        UI.hidePanel('floors-panel');
+        UI.playTeleportFade(() => {
+            inTaberna = false;
+            player.floor = returnFloor;
+            loadFloor(player.floor);
+            player.save();
+            UI.showLevelToastText(`🌀 Regresando al Piso ${returnFloor}`);
+        });
     }
 
     // ----- JEFES DINÁMICOS (minijefe/jefe, aparecen al matar enemigos) -----
@@ -306,16 +444,21 @@
     // propio rango de 10 pisos). Su fuerza y el tamaño del loot escalan
     // según qué tan adentro del rango esté ese piso (pisoEnRango 1-10:
     // piso X1 = más débil/menos loot, piso X0 = más fuerte/más loot).
-    function spawnFinalBossAt(floor) {
+    // Solo crea el enemigo (sin tocar finalBossAlive/player.finalBossFloor
+    // ni avisar nada) — reusado tanto por la aparición real (spawnFinalBossAt)
+    // como por la re-materialización al teletransportarse a un jefe que ya
+    // estaba activo en otro piso (ver teleportToFinalBoss).
+    function spawnFinalBossEntity(floor) {
         const { pisoEnRango } = calcularProbabilidadNucleoAdicional(floor);
         const tierDef = BOSS_TIERS.jefe_final;
         const pool = getEnemyPoolForFloor(floor);
         const base = pool[Math.floor(Math.random() * pool.length)];
         const scaled = buildScaledEnemyType(base, floor);
         const mult = tierDef.mult * (0.5 + 0.5 * (pisoEnRango - 1) / 9);
-
-        scaled.hp = Math.max(1, Math.round(scaled.hp * mult));
-        scaled.dmg = Math.max(1, Math.round(scaled.dmg * mult));
+        // Vida x10 y daño x5 respecto al balance anterior (mismo `mult` base,
+        // solo se le suma un multiplicador extra a cada stat por separado).
+        scaled.hp = Math.max(1, Math.round(scaled.hp * mult * 10));
+        scaled.dmg = Math.max(1, Math.round(scaled.dmg * mult * 5));
         scaled.xp = Math.round(scaled.xp * mult);
         scaled.rarity = getMonsterRarity('mitico');
         scaled.radius = Math.round(base.radius * tierDef.radiusMult);
@@ -327,36 +470,58 @@
 
         const room = dungeon.rooms[Math.floor(Math.random() * dungeon.rooms.length)];
         const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
-        enemies.push(new Enemy(scaled, pos.x, pos.y));
+        const enemy = new Enemy(scaled, pos.x, pos.y);
+        enemies.push(enemy);
+        return enemy;
+    }
 
+    function spawnFinalBossAt(floor) {
+        spawnFinalBossEntity(floor);
         finalBossAlive = true;
+        player.finalBossFloor = floor;
+        player.save();
         UI.showLevelToastText('👑 ¡El Jefe Final apareció!');
         UI.updateFloorHUD(player.floor, enemies.filter(e => e.alive).length, finalBossAlive);
     }
 
     // Se llama por CADA enemigo eliminado (incluye multi-kills por AoE).
-    // Tira minijefe/jefe de forma independiente. Derrotar un minijefe suma
-    // FINAL_BOSS_MINIJEFE_POINTS al contador del Jefe Final, y un jefe
-    // especial de piso suma FINAL_BOSS_JEFE_ESPECIAL_POINTS; al llegar a
-    // FINAL_BOSS_POINTS_TARGET, cada enemigo derrotado tiene
-    // FINAL_BOSS_SPAWN_CHANCE de hacerlo aparecer en el piso actual.
+    // Tira minijefe/jefe de forma independiente. Todo enemigo suma puntos al
+    // contador del Jefe Final (normal +1, minijefe +10, jefe de piso o
+    // dinámico +20 — ver FINAL_BOSS_* en constants.js). Al llegar a
+    // FINAL_BOSS_POINTS_TARGET queda "desbloqueado": cada kill DESPUÉS de
+    // cruzar el umbral (bossHuntKills, no cuenta el que cruzó) suma
+    // FINAL_BOSS_PERCENT_PER_KILL% de probabilidad de que aparezca.
     function handleEnemyKilled(target) {
         registerChestKill(target);
 
         if (target.type.isFinalBoss) {
             finalBossAlive = false;
             player.finalBossPoints = 0;
+            player.bossHuntKills = 0;
+            player.finalBossFloor = null;
+            player.save();
             return;
         }
 
         if (Math.random() < BOSS_TIERS.minijefe.chance) spawnDynamicBoss('minijefe');
         if (Math.random() < BOSS_TIERS.jefe.chance) spawnDynamicBoss('jefe');
 
-        if (target.type.bossKind === 'minijefe') player.finalBossPoints += FINAL_BOSS_MINIJEFE_POINTS;
-        else if (target.type.bossKind === 'jefe_especial') player.finalBossPoints += FINAL_BOSS_JEFE_ESPECIAL_POINTS;
+        if (Math.random() < SPAWN_ZONE_CREATE_CHANCE) createSpawnZone();
 
-        if (!finalBossAlive && player.finalBossPoints >= FINAL_BOSS_POINTS_TARGET && Math.random() < FINAL_BOSS_SPAWN_CHANCE) {
-            spawnFinalBossAt(player.floor);
+        const bossKind = target.type.bossKind;
+        const alreadyPrimed = player.finalBossPoints >= FINAL_BOSS_POINTS_TARGET;
+        if (bossKind === 'minijefe') player.finalBossPoints += FINAL_BOSS_MINIJEFE_POINTS;
+        else if (bossKind === 'jefe' || bossKind === 'jefe_especial' || bossKind === 'jefe_aleatorio') player.finalBossPoints += FINAL_BOSS_JEFE_ESPECIAL_POINTS;
+        else player.finalBossPoints += FINAL_BOSS_NORMAL_POINTS;
+
+        if (!finalBossAlive && alreadyPrimed) {
+            player.bossHuntKills++;
+            const chancePercent = getFinalBossSpawnChancePercent(player.bossHuntKills);
+            if (Math.random() * 100 < chancePercent) {
+                spawnFinalBossAt(player.floor);
+                player.finalBossPoints = 0;
+                player.bossHuntKills = 0;
+            }
         }
     }
 
@@ -460,27 +625,183 @@
         }
     }
 
-    // Viaja al piso `targetFloor` (usado por los 4 portales de esquina, ver
-    // generarPortales en grid-dungeon.js). `destino: 'aleatorio'` (portal
-    // abajo-derecha) se resuelve acá mismo, ya que no hay menú principal en
-    // este juego.
+    // ----- ZONAS DE SPAWN INCREMENTADO -----
+    // Hotspot temporal en una sala aleatoria del piso: mantiene entre
+    // SPAWN_ZONE_MIN_ENEMIES y SPAWN_ZONE_MAX_ENEMIES enemigos propios vivos
+    // (rellenados en lotes por tickSpawnZones, ver update()) durante una
+    // duración aleatoria (10/20/30 min), hasta un máximo de
+    // SPAWN_ZONE_MAX_PER_FLOOR simultáneas por piso.
+    function createSpawnZone() {
+        const naturalCount = spawnZones.filter(z => !z.isPlayerZone).length;
+        if (naturalCount >= SPAWN_ZONE_MAX_PER_FLOOR) return;
+        if (!dungeon.rooms.length) return;
+        const room = dungeon.rooms[Math.floor(Math.random() * dungeon.rooms.length)];
+        const center = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
+        const durationMin = SPAWN_ZONE_DURATIONS_MIN[Math.floor(Math.random() * SPAWN_ZONE_DURATIONS_MIN.length)];
+        const zone = {
+            id: `zone_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+            x: center.x, y: center.y,
+            radius: SPAWN_ZONE_RADIUS,
+            room,
+            durationMin,
+            expiresAt: Date.now() + durationMin * 60000,
+            nextRefillAt: 0, // 0 fuerza un lote inicial en el próximo tick
+            color: SPAWN_ZONE_COLORS[naturalCount % SPAWN_ZONE_COLORS.length],
+            isPlayerZone: false,
+        };
+        spawnZones.push(zone);
+    }
+
+    // Pergamino de Alteración (ver ☢️ en constants.js/ui.js): misma mecánica
+    // que una zona natural, pero centrada en el jugador, con cupo propio
+    // (SPAWN_ZONE_MAX_PLAYER_PER_FLOOR, no cuenta para el de arriba) y color
+    // distintivo. `room` se sintetiza como un cuadrado alrededor del centro
+    // para poder reusar dungeon.randomPointInRoom sin cambios.
+    function createPlayerAlteracionZone(tierId) {
+        const playerCount = spawnZones.filter(z => z.isPlayerZone).length;
+        if (playerCount >= SPAWN_ZONE_MAX_PLAYER_PER_FLOOR) return null;
+        const durationMin = ALTERACION_TIER_DURATIONS_MIN[tierId] || 10;
+        const cx = player.x, cy = player.y;
+        const zone = {
+            id: `pzone_${Date.now()}_${Math.floor(Math.random() * 1e6)}`,
+            x: cx, y: cy,
+            radius: SPAWN_ZONE_RADIUS,
+            room: { x: cx - SPAWN_ZONE_RADIUS, y: cy - SPAWN_ZONE_RADIUS, w: SPAWN_ZONE_RADIUS * 2, h: SPAWN_ZONE_RADIUS * 2 },
+            durationMin,
+            expiresAt: Date.now() + durationMin * 60000,
+            nextRefillAt: 0,
+            color: SPAWN_ZONE_PLAYER_COLOR,
+            isPlayerZone: true,
+        };
+        spawnZones.push(zone);
+        return zone;
+    }
+
+    // Enemigos vivos que pertenecen a una zona (marcados con
+    // en.spawnZoneId al spawnearlos, ver más abajo).
+    function countZoneEnemies(zone) {
+        return enemies.filter(e => e.alive && e.spawnZoneId === zone.id).length;
+    }
+
+    const SPAWN_ZONE_REFILL_COOLDOWN = 4000; // pausa entre lotes de una misma zona
+
+    function tickSpawnZones() {
+        const now = Date.now();
+        spawnZones = spawnZones.filter(z => {
+            if (now < z.expiresAt) return true;
+            if (z.isPlayerZone) {
+                // Al expirar, se eliminan los enemigos restantes de la zona
+                // (sin loot/XP — desaparecen, no se derrotan).
+                enemies.forEach(e => { if (e.spawnZoneId === z.id) e.alive = false; });
+                UI.showLevelToastText('☢️ Zona de Alteración expirada');
+            }
+            return false;
+        });
+
+        spawnZones.forEach(zone => {
+            const aliveInZone = countZoneEnemies(zone);
+            if (aliveInZone >= SPAWN_ZONE_REFILL_THRESHOLD) return;
+            if (now < zone.nextRefillAt) return;
+
+            // Las zonas de Alteración (pergamino, ver createPlayerAlteracionZone)
+            // tienen prioridad garantizada: mantienen 20-30 SIN importar el cap
+            // global del piso (ENEMIES_PER_FLOOR) — si no, con varias zonas
+            // naturales + de jugador activas a la vez el piso se satura antes
+            // de que le toque el turno a una zona de jugador, y se queda
+            // atascada en 0 para siempre. Las naturales sí respetan el cap.
+            const aliveTotal = enemies.filter(e => e.alive).length;
+            const globalRoom = zone.isPlayerZone ? Infinity : Math.max(0, ENEMIES_PER_FLOOR - aliveTotal);
+            const batchSize = Math.min(
+                SPAWN_ZONE_BATCH_MIN + Math.floor(Math.random() * (SPAWN_ZONE_BATCH_MAX - SPAWN_ZONE_BATCH_MIN + 1)),
+                SPAWN_ZONE_MAX_ENEMIES - aliveInZone,
+                globalRoom,
+            );
+            zone.nextRefillAt = now + SPAWN_ZONE_REFILL_COOLDOWN;
+            if (batchSize <= 0) return;
+
+            const pool = getEnemyPoolForFloor(player.floor);
+            for (let i = 0; i < batchSize; i++) {
+                const base = pool[Math.floor(Math.random() * pool.length)];
+                const type = buildScaledEnemyType(base, player.floor);
+                applyMonsterRarity(type);
+                let pos = dungeon.randomPointInRoom(zone.room, TILE_SIZE * 1.5);
+                if (!dungeon.isWalkable(pos.x, pos.y, type.radius)) pos = { x: zone.x, y: zone.y };
+                const en = new Enemy(type, pos.x, pos.y);
+                en.spawnZoneId = zone.id;
+                enemies.push(en);
+            }
+        });
+    }
+
+    // Zona en la que está parado el jugador ahora mismo (si hay alguna),
+    // para el texto de HUD "Zona de Spawn: XX enemigos restantes".
+    function findPlayerSpawnZone() {
+        return spawnZones.find(z => Math.hypot(player.x - z.x, player.y - z.y) <= z.radius) || null;
+    }
+
+    // Viaja al piso `targetFloor` (usado por los portales, ver
+    // generarPortales en grid-dungeon.js): valida el rango [1, MAX_FLOOR] y
+    // hace un fundido de pantalla (ver UI.playTeleportFade) antes de cargar
+    // el piso nuevo, igual que la Ventana de Pisos (tecla P).
     function travelToFloor(targetFloor) {
-        if (targetFloor === 'aleatorio') targetFloor = 1 + Math.floor(Math.random() * MAX_FLOOR);
         targetFloor = Math.max(1, Math.min(MAX_FLOOR, targetFloor));
         if (targetFloor === player.floor) {
             addFloatingText(player.x, player.y - 40, 'Ya estás en este piso', '#ffd27a');
             return;
         }
-        player.floor = targetFloor;
-        loadFloor(player.floor);
-        player.save();
-        UI.showLevelToastText(`🌀 Piso ${player.floor}`);
+        UI.playTeleportFade(() => {
+            player.floor = targetFloor;
+            loadFloor(player.floor);
+            player.save();
+            UI.showLevelToastText(`🌀 Piso ${player.floor}`);
+        });
+    }
+
+    // Portales: NO se activan por colisión — hay que estar cerca y hacer
+    // click sobre el portal (ver handleWorldClick) o presionar Espacio (ver
+    // bindInput) estando en rango. Al pasar cerca se muestra "Portal al
+    // Piso N" una sola vez (hasta alejarse) como aviso de que se puede
+    // interactuar. portalCooldownUntil evita que el spawn del jugador (que
+    // cae justo sobre el portal central del piso nuevo) dispare un
+    // teleport si quedara alguna pulsación de Espacio en curso.
+    const PORTAL_HINT_RADIUS = 90;
+    function checkPortalCollisions() {
+        if (dead || Combat.active || isAnyPanelOpen()) return;
+        for (let i = 0; i < portals.length; i++) {
+            const p = portals[i];
+            const dist = Math.hypot(p.x - player.x, p.y - player.y);
+            if (dist <= PORTAL_HINT_RADIUS) {
+                if (!portalsCercaHint.has(i)) {
+                    portalsCercaHint.add(i);
+                    addFloatingText(p.x, p.y - p.radius - 14, `Portal al Piso ${p.destino}`, '#c9a6ff');
+                }
+            } else {
+                portalsCercaHint.delete(i);
+            }
+        }
+    }
+
+    // Nearest portal to the player within interact range (click/Espacio).
+    function findNearestPortalInRange() {
+        let best = null, bestDist = Infinity;
+        portals.forEach(p => {
+            const d = Math.hypot(p.x - player.x, p.y - player.y);
+            if (d <= PORTAL_HINT_RADIUS && d < bestDist) { bestDist = d; best = p; }
+        });
+        return best;
+    }
+
+    // Acción compartida por click y Espacio: activa el portal si el cooldown
+    // post-loadFloor ya pasó (ver comentario de portalCooldownUntil arriba).
+    function activatePortal(p) {
+        if (Date.now() < portalCooldownUntil) return;
+        travelToFloor(p.destino);
     }
 
     // Teletransportación vía Ventana de Pisos (tecla P): a diferencia de
-    // travelToFloor (portales, sin costo, solo piso ±1/reset/aleatorio),
-    // esto salta a CUALQUIER piso ya alcanzado (player.maxFloorReached) a
-    // cambio de 1 Pergamino de Teletransportación.
+    // travelToFloor (portales, sin costo, solo piso ±1), esto salta a
+    // CUALQUIER piso ya alcanzado (player.maxFloorReached) a cambio de 1
+    // Pergamino de Teletransportación.
     function teleportToFloor(targetFloor) {
         if (dead || Combat.active) return;
         if (targetFloor === player.floor) {
@@ -498,6 +819,55 @@
             loadFloor(player.floor);
             player.save();
             UI.showLevelToastText(`📜 ¡Teletransportado al Piso ${targetFloor}!`);
+            UI.renderInventory(player);
+        });
+    }
+
+    // Ventana de Teletransporte al Jefe Final (ver notificación ⚔️👑 en el
+    // HUD): consume 1 Pergamino de Teletransportación para saltar directo
+    // al piso donde hay un Jefe Final activo (aunque el jugador ya se haya
+    // ido de ahí), re-materializándolo si el piso se regeneró en el camino
+    // (spawnFinalBossEntity, sin re-anunciar "apareció" ni re-marcar
+    // player.finalBossFloor, que ya apunta ahí).
+    function teleportToFinalBoss() {
+        if (dead || Combat.active || inTaberna) return;
+        const targetFloor = player.finalBossFloor;
+        if (targetFloor === null) {
+            UI.showLevelToastText('❌ El Jefe Final ha sido derrotado.');
+            UI.hideBossTeleportPanel();
+            return;
+        }
+        if (targetFloor > player.maxFloorReached) return; // botón ya deshabilitado, defensivo
+        if ((player.materials.pergamino_teletransporte || 0) < 1) return; // ídem
+
+        if (targetFloor === player.floor) {
+            UI.showLevelToastText('Ya estás en el piso del Jefe Final');
+            UI.hideBossTeleportPanel();
+            return;
+        }
+
+        player.materials.pergamino_teletransporte--;
+        UI.hidePanel('floors-panel');
+        UI.hideBossTeleportPanel();
+        UI.playTeleportFade(() => {
+            player.floor = targetFloor;
+            loadFloor(player.floor);
+            const boss = spawnFinalBossEntity(targetFloor);
+            finalBossAlive = true;
+
+            // Cerca del jefe, pero no encima.
+            const angle = Math.random() * Math.PI * 2;
+            const offset = boss.radius + player.radius + 60;
+            let px = boss.x + Math.cos(angle) * offset;
+            let py = boss.y + Math.sin(angle) * offset;
+            if (!dungeon.isWalkable(px, py, player.radius)) { px = boss.x; py = boss.y; }
+            player.x = px;
+            player.y = py;
+            updateCamera();
+
+            player.save();
+            UI.showLevelToastText(`Teletransportado al Piso ${targetFloor}`);
+            UI.updateFloorHUD(player.floor, enemies.filter(e => e.alive).length, finalBossAlive);
             UI.renderInventory(player);
         });
     }
@@ -523,7 +893,7 @@
     }
 
     function isAnyPanelOpen() {
-        return ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel', 'combat-panel', 'victory-panel']
+        return ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel', 'combat-panel', 'victory-panel', 'gold-panel', 'shop-panel', 'menu-panel', 'boss-teleport-panel']
             .some(id => !document.getElementById(id).classList.contains('hidden'));
     }
 
@@ -536,6 +906,28 @@
         UI.hidePanel('inventory-panel');
         document.getElementById('map-panel').classList.remove('hidden');
         UI.showLevelToastText('🗺️ Tocá el mapa para teletransportarte');
+    }
+
+    // Pergamino de Alteración (ver ☢️ arriba): crea una zona de spawn
+    // centrada en el jugador, del mismo tier de enemigo/rareza que el piso
+    // actual (reusa tickSpawnZones tal cual). No disponible en la Taberna
+    // (sin enemigos que spawnear) ni durante combate.
+    function useAlteracionScroll(tierId) {
+        if (dead || Combat.active || inTaberna) return;
+        const materialId = `pergamino_alteracion_tier${tierId}`;
+        if ((player.materials[materialId] || 0) <= 0) return;
+
+        const playerCount = spawnZones.filter(z => z.isPlayerZone).length;
+        if (playerCount >= SPAWN_ZONE_MAX_PLAYER_PER_FLOOR) {
+            UI.showLevelToastText('❌ Máximo de zonas de alteración alcanzado en este piso');
+            return;
+        }
+
+        player.materials[materialId]--;
+        const zone = createPlayerAlteracionZone(tierId);
+        if (!zone) return;
+        UI.showLevelToastText(`☢️ Zona de Alteración creada. Duración: ${zone.durationMin} minutos`);
+        UI.renderInventory(player);
     }
 
     function bindInput() {
@@ -551,6 +943,16 @@
             const { x, y } = toWorldCoords(canvasPos.x, canvasPos.y);
             handleWorldClick(x, y);
         }, { passive: true });
+
+        // Notificación del Jefe Final (ver #final-boss-notification en
+        // index.html): visible mientras haya un Jefe Final activo en
+        // cualquier piso, pero no clickeable en la Taberna (sigue visible
+        // igual, ver UI.updateFinalBossNotification).
+        document.getElementById('final-boss-notification').addEventListener('click', () => {
+            if (inTaberna || dead || Combat.active) return;
+            if (player.finalBossFloor === null) return;
+            UI.showBossTeleportPanel(player);
+        });
 
         // Click sobre el mapa ampliado: solo hace algo mientras se está
         // usando un pergamino de teletransportación (ver requestTeleport).
@@ -614,6 +1016,8 @@
             if (key === ' ') {
                 e.preventDefault();
                 if (dead || isAnyPanelOpen()) return;
+                const portal = findNearestPortalInRange();
+                if (portal) { activatePortal(portal); return; }
                 const enemy = findNearestEnemyInRange();
                 if (enemy) { engageEnemy(enemy); return; }
                 const chest = findNearestChest();
@@ -626,7 +1030,14 @@
             if (key === 'escape') {
                 e.preventDefault();
                 teleportPending = false;
-                ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel'].forEach(id => UI.hidePanel(id));
+                const closablePanels = ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel', 'gold-panel', 'shop-panel', 'menu-panel', 'boss-teleport-panel'];
+                const anyOpen = closablePanels.some(id => !document.getElementById(id).classList.contains('hidden'));
+                if (anyOpen) {
+                    closablePanels.forEach(id => UI.hidePanel(id));
+                } else if (!dead && !UI.isVictoryPanelVisible()) {
+                    // Nada abierto: ESC abre el Menú (ver menu-panel en index.html).
+                    UI.showMenuPanel();
+                }
                 return;
             }
 
@@ -635,7 +1046,7 @@
             else if (key === 'm') { teleportPending = false; UI.togglePanel('map-panel'); }
             else if (key === 'c') { UI.renderCraft(player); UI.togglePanel('craft-panel'); }
             else if (key === 'v') { UI.renderStats(player); UI.togglePanel('stats-panel'); }
-            else if (key === 'p') { UI.renderFloors(player); UI.togglePanel('floors-panel'); }
+            else if (key === 'p') { UI.renderFloors(player, inTaberna, floorBeforeTaberna); UI.togglePanel('floors-panel'); }
             else if (key === 'g') { UI.renderGuide(); UI.togglePanel('guide-panel'); }
             else if (key === 'r') { if (dead) respawn(); }
         });
@@ -750,18 +1161,36 @@
         addFloatingText(node.x, node.y - 52, `+${qty} ${matInfo.emoji} ${matInfo.name}`, '#ffd27a');
     }
 
+    const MERCHANT_INTERACT_RANGE = 140;
+    const MERCHANT_CLICK_RADIUS = 44;
+
     function handleWorldClick(x, y) {
         if (dead || Combat.active || isAnyPanelOpen()) return;
 
-        // 0) ¿Se hizo click sobre alguno de los 4 portales de esquina?
+        // -1) Taberna: ¿se hizo click sobre el Mercader? -> abre la ventana
+        // de comercio si está cerca.
+        if (inTaberna && dungeon.mercaderPos) {
+            const mp = dungeon.mercaderPos;
+            if (Math.hypot(mp.x - x, mp.y - y) <= MERCHANT_CLICK_RADIUS) {
+                if (Math.hypot(mp.x - player.x, mp.y - player.y) > MERCHANT_INTERACT_RANGE) {
+                    addFloatingText(mp.x, mp.y - 50, 'Muy lejos', '#ffd27a');
+                    return;
+                }
+                UI.showShopPanel(player);
+                return;
+            }
+        }
+
+        // 0) ¿Se hizo click sobre un portal? -> teletransporta solo si está
+        // cerca (ver PORTAL_HINT_RADIUS); si no, activatePortal no hace nada.
         const clickedPortal = portals.find(p => Math.hypot(p.x - x, p.y - y) <= p.radius + 8);
         if (clickedPortal) {
             const distToPlayer = Math.hypot(clickedPortal.x - player.x, clickedPortal.y - player.y);
-            if (distToPlayer > ENGAGE_RANGE) {
-                addFloatingText(clickedPortal.x, clickedPortal.y - clickedPortal.radius - 12, 'Acercate al portal', '#ffd27a');
+            if (distToPlayer > PORTAL_HINT_RADIUS) {
+                addFloatingText(clickedPortal.x, clickedPortal.y - clickedPortal.radius - 10, 'Muy lejos', '#ffd27a');
                 return;
             }
-            travelToFloor(clickedPortal.destino);
+            activatePortal(clickedPortal);
             return;
         }
 
@@ -849,10 +1278,19 @@
         }
 
         player.move(dirX, dirY, dt, (x, y, r) => dungeon.isWalkable(x, y, r));
+        checkPortalCollisions();
         player.tick(dt);
         updateCamera();
 
         nodes.forEach(n => n.update(dt));
+        tickSpawnZones();
+        const zoneHere = findPlayerSpawnZone();
+        UI.updateSpawnZoneHUD(zoneHere ? {
+            enemiesLeft: countZoneEnemies(zoneHere),
+            minutesLeft: Math.max(0, Math.ceil((zoneHere.expiresAt - Date.now()) / 60000)),
+            isPlayerZone: !!zoneHere.isPlayerZone,
+        } : null);
+        UI.updateAlteracionCounter(spawnZones.filter(z => z.isPlayerZone).length, SPAWN_ZONE_MAX_PLAYER_PER_FLOOR, inTaberna);
 
         floatingTexts.forEach(f => { f.y += f.vy; f.life -= dt; });
         floatingTexts = floatingTexts.filter(f => f.life > 0);
@@ -864,6 +1302,8 @@
         }
 
         UI.updateHUD(player);
+        UI.updateBossCounter(player, inTaberna, finalBossAlive);
+        UI.updateFinalBossNotification(player, inTaberna);
         UI.showLevelToasts(player);
     }
 
@@ -969,27 +1409,103 @@
         }
     }
 
-    // Emoji/etiqueta según a dónde lleva cada portal de esquina (ver
-    // generarPortales en grid-dungeon.js).
-    const PORTAL_ICONS = { 'arriba-izquierda': '⬅️', 'arriba-derecha': '➡️', 'abajo-izquierda': '🔄', 'abajo-derecha': '🎲' };
+    // Estilo por tipo de portal (ver generarPortales en grid-dungeon.js):
+    // 'siguiente' (las 4 esquinas, ascenso) vs 'anterior' (el central,
+    // descenso) tienen emoji y color distintos para distinguirse de un
+    // vistazo (ver INDICADORES VISUALES del diseño).
+    const PORTAL_STYLE = {
+        siguiente: { icon: '⬆️', fill: 'rgba(130,90,255,0.7)', stroke: '#c9a6ff' },
+        anterior: { icon: '⬇️', fill: 'rgba(255,178,71,0.7)', stroke: '#ffd27a' },
+    };
+
+    // Decoración de la Taberna (ver generarTaberna en grid-dungeon.js): sin
+    // sprites/imágenes (este juego entero se dibuja con canvas 2D + emoji,
+    // ver drawEntity), así que mesas/mostrador/chimenea/antorchas son formas
+    // simples + emoji, con una animación liviana de parpadeo en el fuego.
+    const TABERNA_TABLE_COLOR = '#5a3a1e';
+    const TABERNA_TABLE_POSITIONS = [
+        { dx: 0.28, dy: 0.55 }, { dx: 0.5, dy: 0.55 }, { dx: 0.72, dy: 0.55 },
+        { dx: 0.28, dy: 0.78 }, { dx: 0.5, dy: 0.78 }, { dx: 0.72, dy: 0.78 },
+    ];
+
+    function drawTabernaTable(cx, cy) {
+        ctx.fillStyle = TABERNA_TABLE_COLOR;
+        ctx.fillRect(cx - 46, cy - 30, 92, 60);
+        ctx.strokeStyle = '#2e1c0d';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(cx - 46, cy - 30, 92, 60);
+        // 4 sillas (puntos alrededor de la mesa).
+        ctx.fillStyle = '#3d2814';
+        [[-70, 0], [70, 0], [0, -48], [0, 48]].forEach(([ox, oy]) => {
+            ctx.beginPath();
+            ctx.arc(cx + ox, cy + oy, 14, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
+    function drawTabernaDecor() {
+        const room = dungeon.rooms[0];
+        if (!room) return;
+        const cx = room.x + room.w / 2;
+
+        // Mostrador: banda horizontal pegada a la pared superior.
+        ctx.fillStyle = '#6b4423';
+        ctx.fillRect(room.x + room.w * 0.25, room.y + 70, room.w * 0.5, 60);
+        ctx.strokeStyle = '#2e1c0d';
+        ctx.lineWidth = 3;
+        ctx.strokeRect(room.x + room.w * 0.25, room.y + 70, room.w * 0.5, 60);
+
+        // Chimenea: pegada a la pared izquierda, con un parpadeo suave.
+        const fireX = room.x + 150, fireY = room.y + room.h / 2;
+        const flicker = 0.85 + Math.sin(Date.now() / 180) * 0.15;
+        ctx.beginPath();
+        ctx.arc(fireX, fireY, 44, 0, Math.PI * 2);
+        ctx.fillStyle = '#2e1c0d';
+        ctx.fill();
+        ctx.font = `${Math.round(40 * flicker)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('🔥', fireX, fireY + 2);
+
+        // Antorchas en las 4 esquinas del área.
+        const torchFlicker = 0.8 + Math.sin(Date.now() / 220 + 1) * 0.2;
+        ctx.font = `${Math.round(24 * torchFlicker)}px sans-serif`;
+        [[70, 70], [room.w - 70, 70], [70, room.h - 70], [room.w - 70, room.h - 70]].forEach(([ox, oy]) => {
+            ctx.fillText('🕯️', room.x + ox, room.y + oy);
+        });
+
+        // Mesas con sillas, repartidas por el piso principal.
+        TABERNA_TABLE_POSITIONS.forEach(t => {
+            drawTabernaTable(room.x + room.w * t.dx, room.y + room.h * t.dy);
+        });
+
+        // Mercader: detrás del mostrador.
+        if (dungeon.mercaderPos) {
+            drawEntity(dungeon.mercaderPos.x, dungeon.mercaderPos.y, 32, '💰', '#ffd27a');
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillStyle = '#ffe9b8';
+            ctx.textAlign = 'center';
+            ctx.fillText('Mercader', dungeon.mercaderPos.x, dungeon.mercaderPos.y + 46);
+        }
+    }
 
     function drawPortals() {
         portals.forEach(p => {
+            const style = PORTAL_STYLE[p.tipo] || PORTAL_STYLE.siguiente;
             ctx.beginPath();
             ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
-            ctx.fillStyle = 'rgba(130,90,255,0.7)';
+            ctx.fillStyle = style.fill;
             ctx.fill();
             ctx.lineWidth = 3;
-            ctx.strokeStyle = '#c9a6ff';
+            ctx.strokeStyle = style.stroke;
             ctx.stroke();
             ctx.font = '26px sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
-            ctx.fillText(PORTAL_ICONS[p.esquina] || '🌀', p.x, p.y + 1);
+            ctx.fillText(style.icon, p.x, p.y + 1);
             ctx.font = 'bold 12px sans-serif';
             ctx.fillStyle = '#e4d9ff';
-            const label = p.destino === 'aleatorio' ? 'Piso al azar' : `Piso ${p.destino}`;
-            ctx.fillText(label, p.x, p.y + p.radius + 16);
+            ctx.fillText(`Piso ${p.destino}`, p.x, p.y + p.radius + 16);
         });
     }
 
@@ -999,6 +1515,7 @@
         ctx.translate(-camera.x, -camera.y);
 
         dungeon.renderWalls(ctx, camera, CANVAS_WIDTH, CANVAS_HEIGHT);
+        if (inTaberna) drawTabernaDecor();
         drawPortals();
         chests.forEach(drawChest);
 
@@ -1033,6 +1550,15 @@
         ctx.globalAlpha = 1;
 
         ctx.restore();
+
+        // Iluminación ambiental del bioma (ver BIOME_THEMES en
+        // constants.js): tinte translúcido sobre toda la vista, en espacio
+        // de pantalla (fuera del translate de cámara) para cubrir el
+        // viewport completo de una sola pasada.
+        if (currentBiome) {
+            ctx.fillStyle = currentBiome.ambientTint;
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        }
 
         drawMinimap();
         if (!mapPanelEl.classList.contains('hidden')) drawBigMap();

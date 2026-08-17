@@ -93,50 +93,50 @@ const WEAPON_ATTACKS = {
         tiers: {
             1: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 12, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 16, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 12, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 16, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Hendedura', emoji: '💥', apCost: 6, damage: 35, chargeRequired: 3 },
             },
             2: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 14.6, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 18.7, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 14.6, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 18.7, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Hendedura', emoji: '💥', apCost: 6, damage: 40, chargeRequired: 3 },
             },
             3: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 17.1, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 21.3, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 17.1, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 21.3, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Hendedura', emoji: '💥', apCost: 6, damage: 45, chargeRequired: 3 },
             },
             4: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 19.7, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 24, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 19.7, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 24, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Tempestad de Fuego', emoji: '🌋', apCost: 6, damage: 20, aoe: true, chargeRequired: 4 },
             },
             5: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 22.3, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 26.7, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 22.3, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 26.7, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Rompedor de Reyes', emoji: '👑', apCost: 6, damage: 60, chargeRequired: 4, defenseDownPercent: 0.5, defenseDownTurns: 1 },
             },
             6: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 24.9, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 29.3, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 24.9, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 29.3, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Escisión Celestial', emoji: '🌠', apCost: 6, damage: 65, aoe: true, chargeRequired: 5, heal: 5 },
             },
             7: {
                 basic: [
-                    { name: 'Estocada', emoji: '⚔️', apCost: 2, damage: 27.4, chargeGain: 1, grantsClassCharge: true },
-                    { name: 'Corte', emoji: '🌀', apCost: 3, damage: 32, chargeGain: 2, consumesClassCharge: true },
+                    { name: 'Estocada', emoji: '⚔️', apCost: 3, damage: 27.4, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Corte', emoji: '🌀', apCost: 4, damage: 32, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Cataclismo', emoji: '☄️', apCost: 6, damage: 70, aoe: true, chargeRequired: 5, stun: { chance: 1 } },
             },
@@ -212,49 +212,49 @@ const WEAPON_ATTACKS = {
         tiers: {
             1: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 13, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 13, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 18, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Furia del Hacha', emoji: '😡', apCost: 6, damage: 32, chargeRequired: 3 },
             },
             2: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 16.3, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 16.3, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 24.8, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Furia del Hacha', emoji: '😡', apCost: 6, damage: 37, chargeRequired: 3 },
             },
             3: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 19.5, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 19.5, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 31.5, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Furia del Hacha', emoji: '😡', apCost: 6, damage: 42, chargeRequired: 3 },
             },
             4: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 22.8, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 22.8, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 38.3, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Inferno', emoji: '🌋', apCost: 6, damage: 22, aoe: true, chargeRequired: 4 },
             },
             5: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 26, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 26, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 45, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Tormenta de Hachas', emoji: '🌪️', apCost: 6, damage: 19, hits: 3, chargeRequired: 4 },
             },
             6: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 29.3, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 29.3, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 51.8, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Aullido Celestial', emoji: '📯', apCost: 6, damage: 62, aoe: true, chargeRequired: 5, heal: 4 },
             },
             7: {
                 basic: [
-                    { name: 'Tajo', emoji: '🪓', apCost: 2, damage: 32.5, chargeGain: 1, grantsClassCharge: true },
+                    { name: 'Tajo', emoji: '🪓', apCost: 3, damage: 32.5, chargeGain: 1, grantsClassCharge: true },
                     { name: 'Tajo Desgarrador', emoji: '🩸', apCost: 4, damage: 58.5, chargeGain: 2, consumesClassCharge: true },
                 ],
                 special: { name: 'Apocalipsis', emoji: '☄️', apCost: 6, damage: 67, aoe: true, chargeRequired: 5, critChance: 0.20, critMultiplier: 2 },

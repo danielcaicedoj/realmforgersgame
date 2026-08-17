@@ -282,14 +282,24 @@ function garantizarConexion(tm, salas, punto) {
     conectarPuntos(tm, punto.x, punto.y, mejor.x, mejor.y);
 }
 
-// ----- PORTALES (4 esquinas fijas) -----
+// ----- PORTALES -----
+// 4 fijos en las esquinas del mapa, todos al Piso Siguiente (Actual+1, tope
+// en MAX_FLOOR) — "tipo: siguiente"/ascenso. Un 5to portal, exactamente en
+// la posición de aparición del jugador (centro del mapa), al Piso Anterior
+// (Actual-1) — "tipo: anterior"/descenso; no existe en el Piso 1 (no hay
+// piso 0 al que bajar).
 function generarPortales(pisoActual) {
-    return [
-        { posicion: { x: 100, y: 100 }, esquina: 'arriba-izquierda', destino: Math.max(1, pisoActual - 1) },
-        { posicion: { x: 19100, y: 100 }, esquina: 'arriba-derecha', destino: Math.min(MAX_FLOOR, pisoActual + 1) },
-        { posicion: { x: 100, y: 11900 }, esquina: 'abajo-izquierda', destino: 1 },
-        { posicion: { x: 19100, y: 11900 }, esquina: 'abajo-derecha', destino: 'aleatorio' },
+    const siguiente = Math.min(MAX_FLOOR, pisoActual + 1);
+    const portales = [
+        { posicion: { x: 100, y: 100 }, esquina: 'arriba-izquierda', destino: siguiente, tipo: 'siguiente' },
+        { posicion: { x: 19100, y: 100 }, esquina: 'arriba-derecha', destino: siguiente, tipo: 'siguiente' },
+        { posicion: { x: 100, y: 11900 }, esquina: 'abajo-izquierda', destino: siguiente, tipo: 'siguiente' },
+        { posicion: { x: 19100, y: 11900 }, esquina: 'abajo-derecha', destino: siguiente, tipo: 'siguiente' },
     ];
+    if (pisoActual > 1) {
+        portales.push({ posicion: { ...POSICION_JUGADOR_INICIO }, esquina: 'centro', destino: pisoActual - 1, tipo: 'anterior' });
+    }
+    return portales;
 }
 
 // ----- JEFES -----
@@ -404,12 +414,12 @@ function randomPointInRoomGrid(room, margin) {
     return { x, y };
 }
 
-function renderWallsGrid(tm, ctx, camera, canvasWidth, canvasHeight) {
+function renderWallsGrid(tm, ctx, camera, canvasWidth, canvasHeight, wallColor) {
     const c1 = Math.max(0, Math.floor(camera.x / TILE_SIZE));
     const r1 = Math.max(0, Math.floor(camera.y / TILE_SIZE));
     const c2 = Math.min(tm.cols - 1, Math.floor((camera.x + canvasWidth) / TILE_SIZE));
     const r2 = Math.min(tm.rows - 1, Math.floor((camera.y + canvasHeight) / TILE_SIZE));
-    ctx.fillStyle = '#0d0b14';
+    ctx.fillStyle = wallColor || '#0d0b14';
     for (let cy = r1; cy <= r2; cy++) {
         for (let cx = c1; cx <= c2; cx++) {
             if (tm.tiles[tileIndexTM(tm, cx, cy)] === 0) {
@@ -476,7 +486,52 @@ function generateDungeon(pisoActual) {
     piso.isWalkable = (x, y, radius) => isWalkableGrid(tm, x, y, radius);
     piso.randomPointInRoom = (room, margin) => randomPointInRoomGrid(room, margin);
     piso.getLargestRoom = () => piso.rooms.reduce((best, r) => (r.w * r.h > best.w * best.h ? r : best), piso.rooms[0]);
-    piso.renderWalls = (ctx, camera, w, h) => renderWallsGrid(tm, ctx, camera, w, h);
+    const biome = getBiomeForFloor(pisoActual);
+    piso.biome = biome;
+    piso.renderWalls = (ctx, camera, w, h) => renderWallsGrid(tm, ctx, camera, w, h, biome.wallColor);
 
     return piso;
+}
+
+// ----- TABERNA (piso especial de descanso y comercio, ver SISTEMA DE
+// TABERNA en game.js) -----
+// Un único mundo fijo (no varía entre visitas): 2x2 celdas de tamaño
+// MÁXIMO (TAMAÑO_CELDA_ANCHO x TAMAÑO_CELDA_ALTO cada una, igual que
+// cualquier sala máxima de un piso normal) formando un área abierta de
+// ~3200x2400 sin corredores internos (las 4 quedan directamente
+// adyacentes). Reusa el mismo tilemap/interfaz que generateDungeon() para
+// que el resto de game.js (movimiento, cámara, minimapa) no necesite ramas
+// especiales.
+function generarTaberna() {
+    const tm = crearTilemap();
+    const anchoTotal = TAMAÑO_CELDA_ANCHO * 2;
+    const altoTotal = TAMAÑO_CELDA_ALTO * 2;
+    const originX = POSICION_JUGADOR_INICIO.x - anchoTotal / 2;
+    const originY = POSICION_JUGADOR_INICIO.y - altoTotal / 2;
+    pintarRectEnTilemap(tm, originX, originY, anchoTotal, altoTotal);
+
+    const room = { x: originX, y: originY, w: anchoTotal, h: altoTotal };
+    // Mercader detrás del "mostrador", pegado a la pared superior y
+    // centrado horizontalmente (ver drawTabernaDecor en game.js).
+    const mercaderPos = { x: originX + anchoTotal / 2, y: originY + 150 };
+
+    return {
+        numeroDelPiso: null,
+        tilemap: tm,
+        cols: tm.cols,
+        rows: tm.rows,
+        tiles: tm.tiles,
+        tileIndex: (cx, cy) => tileIndexTM(tm, cx, cy),
+        rooms: [room],
+        isWalkable: (x, y, radius) => isWalkableGrid(tm, x, y, radius),
+        randomPointInRoom: (r, margin) => randomPointInRoomGrid(r, margin),
+        getLargestRoom: () => room,
+        renderWalls: (ctx, camera, w, h) => renderWallsGrid(tm, ctx, camera, w, h, TABERNA_THEME.wallColor),
+        posicionJugadorInicio: { x: POSICION_JUGADOR_INICIO.x, y: POSICION_JUGADOR_INICIO.y },
+        mercaderPos,
+        biome: TABERNA_THEME,
+        esTaberna: true,
+        portales: [],
+        jefe: null,
+    };
 }

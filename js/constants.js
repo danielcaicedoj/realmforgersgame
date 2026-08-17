@@ -23,6 +23,29 @@ const RESOURCE_ZONES_PER_TYPE = 4; // zonas por tipo (árbol/roca/tierra/cultivo
 const RESOURCE_ZONE_MIN_NODES = 5;
 const RESOURCE_ZONE_MAX_NODES = 15;
 
+// ----- ZONAS DE SPAWN INCREMENTADO -----
+// Hotspots temporales de enemigos en una sala: mantienen 20-30 enemigos
+// vivos propios (se rellenan por debajo de 20 en lotes de 3-8) durante una
+// duración aleatoria, y desaparecen al expirar. Máximo 3 simultáneas por
+// piso; cada muerte de enemigo tiene una chance chica de crear una nueva.
+const SPAWN_ZONE_MIN_ENEMIES = 20;
+const SPAWN_ZONE_MAX_ENEMIES = 30;
+const SPAWN_ZONE_REFILL_THRESHOLD = 20; // rellena si caen por debajo de esto
+const SPAWN_ZONE_BATCH_MIN = 3;
+const SPAWN_ZONE_BATCH_MAX = 8;
+const SPAWN_ZONE_DURATIONS_MIN = [10, 20, 30]; // minutos, una se sortea al crear la zona
+const SPAWN_ZONE_MAX_PER_FLOOR = 3;
+const SPAWN_ZONE_CREATE_CHANCE = 0.005; // 0.5% por enemigo derrotado
+const SPAWN_ZONE_RADIUS = 260; // px: pertenencia a la zona + radio del círculo dibujado
+const SPAWN_ZONE_COLORS = ['#ff5c5c', '#5cc8ff', '#ffd25c'];
+
+// Zonas creadas por el jugador (Pergamino de Alteración, ver
+// ALTERACION_TIER_DURATIONS_MIN más abajo): misma mecánica de refill que las
+// naturales de arriba, pero en un array/cupo aparte (no cuentan para
+// SPAWN_ZONE_MAX_PER_FLOOR) y con color propio para distinguirlas.
+const SPAWN_ZONE_MAX_PLAYER_PER_FLOOR = 3;
+const SPAWN_ZONE_PLAYER_COLOR = '#d63cff';
+
 // ----- COFRES -----
 // Nodos que no reaparecen: hay que vencer varios enemigos cerca para
 // desbloquearlos, y después se abren con una carga corta (como recolectar).
@@ -119,6 +142,61 @@ function getEnemyXPReward(floor, rarityId, bossKind) {
     return Math.round(10 * floor * rarityMult * bossMult);
 }
 
+// ----- MULTIPLICADOR POR TAMAÑO DE GRUPO (compartido: loot y oro) -----
+// El "grupo" es la cantidad de enemigos que entraron juntos al mismo
+// combate por turnos (Combat.enemies.length, ver ENGAGE_GROUP_RADIUS en
+// game.js) — el motor ya agrupa por proximidad al enganchar combate, así
+// que reutiliza esa noción en vez de recalcular proximidad de nuevo. 1-2
+// enemigos no reciben bono; el bono queda fijo en el tamaño del grupo con
+// el que se inició ESE combate (no se recalcula si algún enemigo muere a
+// mitad de combate).
+const GROUP_LOOT_MULT = { 3: 1.6, 4: 1.6, 5: 1.7, 6: 1.8, 7: 1.9, 8: 2.0 };
+function getGroupMultiplier(groupSize) {
+    if (groupSize >= 8) return 2.0;
+    return GROUP_LOOT_MULT[groupSize] || 1.0;
+}
+
+// ----- ORO OTORGADO POR ENEMIGO -----
+// Oro_Base = Piso_Actual × Multiplicador_Tier ± 10% (el Multiplicador_Tier
+// se duplica cada 100 pisos: Tier1=x1 .. Tier10=x512, ver
+// getMaterialTierForFloor más abajo, mismos 10 brackets de 100 pisos).
+// Oro_Final = Oro_Base × Multiplicador_Tipo × Multiplicador_Rareza ×
+// Multiplicador_Grupo. "Jefe de Piso" (x50) cubre jefe/jefe_especial/
+// jefe_aleatorio, igual que en getEnemyXPReward. La Rareza reusa
+// XP_RARITY_MULT (mismos valores 1.0-2.0 para XP y oro).
+const GOLD_TYPE_MULT = {
+    minijefe: 10, jefe: 50, jefe_especial: 50, jefe_aleatorio: 50, jefe_final: 100,
+};
+function getGoldTierMultiplier(floor) {
+    return Math.pow(2, Math.floor((floor - 1) / 100));
+}
+function getEnemyGoldReward(floor, rarityId, bossKind, groupSize) {
+    const base = floor * getGoldTierMultiplier(floor);
+    const rolled = base * (0.9 + Math.random() * 0.2); // ±10%
+    const typeMult = GOLD_TYPE_MULT[bossKind] || 1.0;
+    const rarityMult = XP_RARITY_MULT[rarityId] || 1.0;
+    const groupMult = getGroupMultiplier(groupSize || 1);
+    return Math.max(1, Math.round(rolled * typeMult * rarityMult * groupMult));
+}
+
+// Formato abreviado para mostrar oro en la UI (0-999 exacto, K desde 1000,
+// M desde 1,000,000; sin decimales si el K/M cae en un número redondo).
+function formatGold(amount) {
+    amount = Math.floor(amount);
+    if (amount < 1000) return String(amount);
+    const suffix = amount < 1000000 ? 'K' : 'M';
+    const divisor = amount < 1000000 ? 1000 : 1000000;
+    const value = amount / divisor;
+    const rounded = Math.round(value * 10) / 10;
+    return (Number.isInteger(rounded) ? rounded : rounded.toFixed(1)) + suffix;
+}
+
+// Valor exacto con separador de miles (para la ventana de precisión, ver
+// ui.js renderGoldPrecision).
+function formatGoldExact(amount) {
+    return Math.floor(amount).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
 const SAVE_KEY = 'rpg_weapon_progression_save_v3';
 
 // ----- TIERS DE MATERIAL (10 niveles, 100 niveles de jugador cada uno) -----
@@ -140,6 +218,44 @@ const TIERS = [
     { id: 9,  name: 'CELESTIAL',   emoji: '🌟', levelMin: 801, levelMax: 900,  mult: 6.2,  color: '#ffe066' },
     { id: 10, name: 'ABSOLUTO',    emoji: '⚡', levelMin: 901, levelMax: 1000, mult: 7.5,  color: '#7df9ff' },
 ];
+
+// ----- TEMÁTICA DE BIOMAS POR TIER (identidad visual de piso) -----
+// Un tier por cada 100 pisos (mismo bracket que MATERIAL_TIER_BRACKETS).
+// Alcance: color, terreno (piso) e iluminación (tinte ambiental) son
+// directamente renderizables con el motor actual (canvas, sin sprites);
+// la "decoración" (props/estructuras únicas) NO se implementa — requeriría
+// un sistema nuevo de colocación de props que este juego no tiene.
+const BIOME_THEMES = [
+    { tierId: 1,  bioma: 'Cavernas de Bronce',      terreno: 'Piedra parda y tierra',       iluminacion: 'Antorchas cálidas y tenues', wallColor: '#2b1f14', floorColor: '#3a2a1a', ambientTint: 'rgba(205,127,50,0.05)' },
+    { tierId: 2,  bioma: 'Minas de Hierro',         terreno: 'Roca gris y vetas metálicas',  iluminacion: 'Luz fría de faroles',        wallColor: '#24262b', floorColor: '#33363d', ambientTint: 'rgba(192,192,192,0.05)' },
+    { tierId: 3,  bioma: 'Fortaleza de Acero',      terreno: 'Losas de acero pulido',        iluminacion: 'Luz industrial azulada',     wallColor: '#1f2225', floorColor: '#2c3034', ambientTint: 'rgba(113,121,126,0.05)' },
+    { tierId: 4,  bioma: 'Abismo Infernal',         terreno: 'Roca volcánica y ceniza',      iluminacion: 'Resplandor rojizo de lava',  wallColor: '#2a0f08', floorColor: '#451708', ambientTint: 'rgba(255,90,31,0.08)' },
+    { tierId: 5,  bioma: 'Grutas de Mithril',       terreno: 'Cristal azulado y escarcha',   iluminacion: 'Brillo helado y difuso',     wallColor: '#10202b', floorColor: '#16303f', ambientTint: 'rgba(142,207,255,0.07)' },
+    { tierId: 6,  bioma: 'Templo de Orichalcum',    terreno: 'Mármol dorado tallado',        iluminacion: 'Luz cálida ceremonial',      wallColor: '#2b1d08', floorColor: '#3d2a0c', ambientTint: 'rgba(255,179,71,0.06)' },
+    { tierId: 7,  bioma: 'Bóveda Adamantina',       terreno: 'Placas turquesa reforzadas',   iluminacion: 'Resplandor cian estable',    wallColor: '#082825', floorColor: '#0e3c37', ambientTint: 'rgba(111,227,217,0.07)' },
+    { tierId: 8,  bioma: 'Dominio Sombrío',         terreno: 'Piedra negra veteada',         iluminacion: 'Penumbra violeta',           wallColor: '#150a22', floorColor: '#1f1033', ambientTint: 'rgba(91,42,134,0.10)' },
+    { tierId: 9,  bioma: 'Santuario Celestial',     terreno: 'Mármol blanco luminoso',       iluminacion: 'Luz dorada radiante',        wallColor: '#2b2607', floorColor: '#3d3610', ambientTint: 'rgba(255,224,102,0.08)' },
+    { tierId: 10, bioma: 'Vacío Absoluto',          terreno: 'Superficie cristalina cian',   iluminacion: 'Resplandor cian pulsante',   wallColor: '#08272b', floorColor: '#0d3a40', ambientTint: 'rgba(125,249,255,0.10)' },
+];
+
+// Piso especial (ver SISTEMA DE TABERNA en game.js/grid-dungeon.js): no
+// sigue la progresión de Tier del piso, tiene su propia temática fija
+// (madera cálida, luz de fogata) reusando la misma forma que BIOME_THEMES
+// para que currentBiome funcione sin cambios en render()/loadFloor().
+const TABERNA_THEME = {
+    tierId: 0,
+    bioma: 'La Taberna del Descanso',
+    terreno: 'Tablones de madera pulida',
+    iluminacion: 'Luz cálida de fogata y antorchas',
+    wallColor: '#241608',
+    floorColor: '#3a2410',
+    ambientTint: 'rgba(255,166,64,0.10)',
+};
+
+function getBiomeForFloor(floor) {
+    const tierId = getMaterialTierForFloor(floor);
+    return BIOME_THEMES.find(b => b.tierId === tierId) || BIOME_THEMES[0];
+}
 
 function getTierForLevel(level) {
     for (const t of TIERS) {
@@ -170,7 +286,6 @@ const PROFESSIONS = [
     { id: 'campesino',  name: 'CAMPESINO',  emoji: '👨‍🌾', type: 'gather',      weaponLabel: 'Azada',             desc: 'Recolección: cultivos',           baseDamage: 6,  resource: 'plant' },
     { id: 'armadura',   name: 'ARMADURA',   emoji: '🛡️', type: 'passive',      weaponLabel: 'Armadura',          desc: 'Defensa pasiva',                  baseDamage: 0 },
     { id: 'tanque',     name: 'TANQUE',     emoji: '🔨', type: 'combat_block', weaponLabel: 'Martillo y Escudo', desc: 'Defensa y control, sistema de Resistencia', baseDamage: 6 },
-    { id: 'encantador', name: 'ENCANTADOR', emoji: '✨', type: 'craft',         weaponLabel: 'Libro Mágico',      desc: 'Mejorador de equipamiento',       baseDamage: 0 },
     { id: 'desarmado',  name: 'DESARMADO',  emoji: '👊', type: 'combat',        weaponLabel: 'Puños',             desc: 'Combate sin armas: Golpe, Patada y Cabezazo', baseDamage: 5 },
 ];
 
@@ -354,16 +469,22 @@ const BOSS_TIERS = {
 };
 
 // ----- JEFE FINAL: sistema de puntos (desbloqueo) -----
-// Derrotar un minijefe suma 10 puntos, un jefe especial de piso (ver
-// grid-dungeon.js) suma 20. Al llegar a FINAL_BOSS_POINTS_TARGET queda
-// "desbloqueada" la posibilidad de que aparezca: cada enemigo derrotado a
-// partir de ahí tiene FINAL_BOSS_SPAWN_CHANCE de hacerlo aparecer en el
+// Derrotar un enemigo normal suma 1 punto, un minijefe suma 10, un jefe (de
+// piso o dinámico) suma 20. Al llegar a FINAL_BOSS_POINTS_TARGET queda
+// "desbloqueada" la posibilidad de que aparezca: cada enemigo derrotado A
+// PARTIR DE AHÍ (sin contar el que cruzó el umbral) suma
+// FINAL_BOSS_PERCENT_PER_KILL% de probabilidad de hacerlo aparecer en el
 // piso actual del jugador (que siempre cae dentro de "su" rango de 10
-// pisos). El contador se reinicia a 0 recién cuando se lo derrota.
+// pisos), hasta 100%. El contador se reinicia a 0 apenas aparece (no hace
+// falta derrotarlo para que se reinicie, ver contador en el HUD).
 const FINAL_BOSS_POINTS_TARGET = 100;
+const FINAL_BOSS_NORMAL_POINTS = 1;
 const FINAL_BOSS_MINIJEFE_POINTS = 10;
 const FINAL_BOSS_JEFE_ESPECIAL_POINTS = 20;
-const FINAL_BOSS_SPAWN_CHANCE = 0.15;
+const FINAL_BOSS_PERCENT_PER_KILL = 2; // % que suma cada kill después de llegar a 100/100
+function getFinalBossSpawnChancePercent(killsSince100) {
+    return Math.min(100, killsSince100 * FINAL_BOSS_PERCENT_PER_KILL);
+}
 
 // Info (nombre/emoji) de cada material recolectable, para mostrarlo en el
 // bolso del inventario a partir de `player.materials` (que solo guarda id->cantidad).
@@ -439,6 +560,33 @@ WOOD_TIERS.forEach(t => {
 // Combat.onEnemyDefeated). Al usarse abren el mapa; el próximo click ahí
 // teletransporta al jugador (ver game.js).
 MATERIAL_INFO.pergamino_teletransporte = { name: 'Pergamino de Teletransportación', emoji: '📜' };
+
+// ----- PERGAMINO DE ALTERACIÓN (ver SISTEMA DE ZONAS DE JUGADOR en game.js) -----
+// Consumible que crea una zona de spawn incrementado (igual mecánica que las
+// zonas naturales, ver SPAWN_ZONE_* más abajo) centrada en el jugador. 3
+// tiers: la duración depende del tier, no de la rareza/piso donde se use.
+const ALTERACION_TIER_DURATIONS_MIN = { 1: 10, 2: 20, 3: 30 };
+for (let t = 1; t <= 3; t++) {
+    MATERIAL_INFO[`pergamino_alteracion_tier${t}`] = { name: `Pergamino de Alteración Tier ${t}`, emoji: '☢️' };
+}
+
+// Chance de drop al derrotar un enemigo: prioriza el tipo (jefe final
+// garantizado > jefe de piso > minijefe) sobre la rareza; un enemigo normal
+// usa la tabla por rareza.
+const ALTERACION_DROP_BY_RARITY = {
+    comun:      { chance: 0.01, tier: 1 },
+    poco_comun: { chance: 0.02, tier: 1 },
+    raro:       { chance: 0.03, tier: 1 },
+    epico:      { chance: 0.05, tier: 2 },
+    legendario: { chance: 0.10, tier: 2 },
+    mitico:     { chance: 0.15, tier: 3 },
+};
+function getAlteracionDropInfo(rarityId, bossKind) {
+    if (bossKind === 'jefe_final') return { chance: 1, tier: 3, guaranteed: true };
+    if (bossKind === 'jefe' || bossKind === 'jefe_especial' || bossKind === 'jefe_aleatorio') return { chance: 0.25, tier: 3 };
+    if (bossKind === 'minijefe') return { chance: 0.15, tier: 2 };
+    return ALTERACION_DROP_BY_RARITY[rarityId] || ALTERACION_DROP_BY_RARITY.comun;
+}
 
 // La hierba medicinal tiene su propia escala de 10 tiers por rango de piso
 // (independiente de los 7 tiers de mena/armas), con nombre y emoji propios.

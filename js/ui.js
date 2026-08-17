@@ -51,6 +51,20 @@ const UI = {
 
         document.getElementById('combat-endturn-btn').addEventListener('click', () => Combat.playerEndTurn());
         document.getElementById('victory-continue-btn').addEventListener('click', () => this.triggerVictoryContinue());
+
+        // Menú (tecla ESC sin ninguna otra ventana abierta, ver game.js):
+        // por ahora un solo item, acceso directo a la Guía.
+        document.getElementById('menu-guide-btn').addEventListener('click', () => {
+            this.hideMenuPanel();
+            this.renderGuide();
+            this.togglePanel('guide-panel');
+        });
+
+        // Ventana de Teletransporte al Jefe Final (ver notificación en el HUD).
+        document.getElementById('boss-teleport-confirm-btn').addEventListener('click', () => {
+            if (this.onConfirmBossTeleport) this.onConfirmBossTeleport();
+        });
+        document.getElementById('boss-teleport-cancel-btn').addEventListener('click', () => this.hideBossTeleportPanel());
     },
 
     isVictoryPanelVisible() {
@@ -131,10 +145,141 @@ const UI = {
         });
     },
 
+    // Texto de HUD mientras el jugador está parado dentro de una Zona de
+    // Spawn (ver findPlayerSpawnZone en game.js). `info` es null si no está
+    // en ninguna.
+    updateSpawnZoneHUD(info) {
+        const el = document.getElementById('spawn-zone-hud');
+        if (!info) {
+            el.classList.add('hidden');
+            return;
+        }
+        el.classList.remove('hidden');
+        el.classList.toggle('spawn-zone-hud-player', !!info.isPlayerZone);
+        el.textContent = info.isPlayerZone
+            ? `☢️ Zona de Alteración: ${info.enemiesLeft} enemigos, ${info.minutesLeft} minutos restantes`
+            : `🌀 Zona de Spawn: ${info.enemiesLeft} enemigos restantes · ${info.minutesLeft} min`;
+    },
+
     updateFloorHUD(floor, aliveEnemyCount, finalBossAlive) {
-        this.els.floorNumber.textContent = `${floor}/${MAX_FLOOR}`;
+        const biomeNameEl = document.getElementById('floor-biome-name');
+        if (floor === null) {
+            // Taberna (ver SISTEMA DE TABERNA en game.js): no es un piso
+            // numerado, no muestra "N/1000".
+            this.els.floorNumber.textContent = 'TABERNA';
+            if (biomeNameEl) { biomeNameEl.textContent = TABERNA_THEME.bioma; biomeNameEl.dataset.floor = 'taberna'; }
+        } else {
+            this.els.floorNumber.textContent = `${floor}/${MAX_FLOOR}`;
+            if (biomeNameEl && biomeNameEl.dataset.floor !== String(floor)) {
+                biomeNameEl.textContent = getBiomeForFloor(floor).bioma;
+                biomeNameEl.dataset.floor = String(floor);
+            }
+        }
         this.els.floorEnemyCount.textContent = aliveEnemyCount;
         this.els.floorBossIcon.classList.toggle('hidden', !finalBossAlive);
+    },
+
+    // Contador del Jefe Final (esquina superior derecha, ver
+    // FINAL_BOSS_* en constants.js): oculto en la Taberna. Antes de
+    // llegar a 100/100 muestra el puntaje crudo; a partir de ahí muestra
+    // el % de probabilidad de aparición (ver getFinalBossSpawnChancePercent),
+    // y mientras está vivo muestra un estado propio en vez del contador.
+    updateBossCounter(player, inTaberna, finalBossAlive) {
+        const el = document.getElementById('boss-counter');
+        if (!el) return;
+        if (inTaberna) { el.classList.add('hidden'); return; }
+        el.classList.remove('hidden');
+
+        if (finalBossAlive) {
+            el.textContent = '👑 ¡Jefe Final Activo!';
+            el.className = 'boss-counter boss-counter-active';
+            return;
+        }
+
+        const points = player.finalBossPoints;
+        if (points < FINAL_BOSS_POINTS_TARGET) {
+            el.textContent = `⚔️ ${points}/${FINAL_BOSS_POINTS_TARGET}`;
+            el.className = 'boss-counter boss-counter-charging';
+        } else {
+            const percent = getFinalBossSpawnChancePercent(player.bossHuntKills);
+            el.textContent = `⚔️ ${FINAL_BOSS_POINTS_TARGET}/${FINAL_BOSS_POINTS_TARGET} - ${percent}%`;
+            el.className = 'boss-counter boss-counter-primed';
+        }
+    },
+
+    // Contador de Zonas de Alteración activas (ver SISTEMA DE ZONAS DE
+    // JUGADOR en game.js): oculto en la Taberna.
+    updateAlteracionCounter(count, max, inTaberna) {
+        const el = document.getElementById('alteracion-counter');
+        if (!el) return;
+        el.classList.toggle('hidden', !!inTaberna);
+        el.textContent = `☢️ ${count}/${max}`;
+    },
+
+    // Notificación del Jefe Final activo (ver player.finalBossFloor en
+    // player.js): visible en CUALQUIER piso mientras haya uno activo en
+    // algún lado (no solo el actual) — a diferencia de boss-counter/
+    // alteracion-counter, NO se oculta en la Taberna, solo deja de ser
+    // clickeable (ver el listener en game.js/bindInput).
+    updateFinalBossNotification(player, inTaberna) {
+        const el = document.getElementById('final-boss-notification');
+        if (!el) return;
+        if (player.finalBossFloor === null) {
+            el.classList.add('hidden');
+            return;
+        }
+        el.classList.remove('hidden');
+        el.classList.toggle('final-boss-notification-disabled', !!inTaberna);
+        el.textContent = `👑 ¡Jefe Final Activo! - Piso ${player.finalBossFloor}`;
+        el.title = inTaberna ? '' : 'Click para teletransportarte';
+    },
+
+    // Ventana de Teletransporte al Jefe Final (click en la notificación).
+    showBossTeleportPanel(player) {
+        const floor = player.finalBossFloor;
+        if (floor === null) { this.hideBossTeleportPanel(); return; }
+
+        const unlocked = floor <= player.maxFloorReached;
+        const scrollCount = player.materials.pergamino_teletransporte || 0;
+        const hasScroll = scrollCount >= 1;
+        const tierId = getMaterialTierForFloor(floor);
+        const tier = TIERS.find(t => t.id === tierId);
+
+        document.getElementById('boss-teleport-info').innerHTML = `
+            <div class="boss-teleport-row">
+                <div class="item-emoji">👑</div>
+                <div class="item-info">
+                    <div class="item-name">Jefe Final</div>
+                    <div class="item-sub">Ubicación: Piso ${floor}</div>
+                </div>
+            </div>
+            <div class="boss-teleport-details">
+                <div>Tier ${tier.id} (${tier.name}) del Piso ${floor}</div>
+                <div>Tienes: ${scrollCount}/${MAX_PERGAMINOS_TELETRANSPORTE} Pergaminos de Teletransportación 📜</div>
+                <div>Estado: <span class="boss-teleport-state-active">Activo</span></div>
+                <div class="panel-note">Se teletransportará directamente al jefe final. Costo: 1x Pergamino de Teletransportación 📜</div>
+            </div>
+        `;
+
+        const warnings = [];
+        if (!unlocked) warnings.push(`❌ Piso no desbloqueado — Todavía no has visitado este piso. Debes llegar al Piso ${floor} primero.`);
+        if (!hasScroll) warnings.push('❌ Pergaminos insuficientes — Necesitás 1 Pergamino de Teletransportación. No tenés.');
+
+        const warnEl = document.getElementById('boss-teleport-warning');
+        if (warnings.length) {
+            warnEl.classList.remove('hidden');
+            warnEl.innerHTML = warnings.map(w => `<div>${w}</div>`).join('');
+        } else {
+            warnEl.classList.add('hidden');
+            warnEl.innerHTML = '';
+        }
+
+        document.getElementById('boss-teleport-confirm-btn').disabled = !(unlocked && hasScroll);
+        document.getElementById('boss-teleport-panel').classList.remove('hidden');
+    },
+
+    hideBossTeleportPanel() {
+        document.getElementById('boss-teleport-panel').classList.add('hidden');
     },
 
     showLevelToastText(text) {
@@ -242,9 +387,21 @@ const UI = {
         bagTitle.textContent = '🎒 Bolso';
         bagSection.appendChild(bagTitle);
 
+        // Oro: moneda ganada al derrotar enemigos (ver getEnemyGoldReward en
+        // constants.js). Se muestra abreviado (K/M, ver formatGold) y al
+        // hacer click abre un panel con el valor exacto (ver formatGoldExact).
+        const goldGrid = document.createElement('div');
+        goldGrid.className = 'resource-grid';
+        goldGrid.innerHTML = `
+            <div class="resource-chip resource-chip-gold" id="inv-gold-chip" data-open-gold="1" title="Ver valor exacto">
+                <span class="resource-emoji">🪙</span><span class="resource-name">Oro</span><span class="resource-qty">${formatGold(player.gold)}</span>
+            </div>
+        `;
+        bagSection.appendChild(goldGrid);
+
         // Un ítem es "Consumible" (poción/pergamino/alimento); todo lo demás
         // (núcleos, mena, madera, hierba, cultivo) es "Recurso".
-        const isConsumableMaterial = id => id.startsWith('pocion_') || id === 'pergamino_teletransporte' || id.startsWith('food_');
+        const isConsumableMaterial = id => id.startsWith('pocion_') || id === 'pergamino_teletransporte' || id.startsWith('pergamino_alteracion_') || id.startsWith('food_');
 
         const renderMaterialGrid = (ids, emptyText) => {
             if (ids.length === 0) {
@@ -260,13 +417,15 @@ const UI = {
                 const info = getMaterialInfo(id);
                 const isPotion = id.startsWith('pocion_');
                 const isScroll = id === 'pergamino_teletransporte';
+                const isAlteracion = id.startsWith('pergamino_alteracion_');
                 const isFood = id.startsWith('food_');
                 const chip = document.createElement('div');
-                chip.className = 'resource-chip' + (isPotion || isScroll || isFood ? ' resource-chip-potion' : '');
+                chip.className = 'resource-chip' + (isPotion || isScroll || isAlteracion || isFood ? ' resource-chip-potion' : '');
                 chip.innerHTML = `
                     <span class="resource-emoji">${info.emoji}</span><span class="resource-name">${info.name}</span><span class="resource-qty">x${player.materials[id]}</span>
                     ${isPotion ? `<button class="use-potion-btn" data-use-potion="${id.slice('pocion_'.length)}">Usar</button>` : ''}
                     ${isScroll ? `<button class="use-potion-btn" data-use-scroll="1">Usar</button>` : ''}
+                    ${isAlteracion ? `<button class="use-potion-btn" data-use-alteracion="${id.slice('pergamino_alteracion_tier'.length)}">Usar</button>` : ''}
                     ${isFood ? `<button class="use-potion-btn" data-use-food="${id.slice('food_'.length)}">Usar</button>` : ''}
                 `;
                 grid.appendChild(chip);
@@ -342,7 +501,7 @@ const UI = {
                     <div class="item-name">${getWeaponName(prof.id, tier.id)}</div>
                     <div class="item-sub">${prof.emoji} ${prof.name} · Nivel ${player.level} · Tier ${tier.id} ${tier.name}</div>
                 </div>
-                ${canEquip ? `<button class="equip-btn" data-equip="${prof.id}">[E] Equipar</button>` : `<span class="passive-tag">${prof.type === 'gather' ? 'Siempre disponible' : 'Sin equipar'}</span>`}
+                ${canEquip ? `<button class="equip-btn" data-equip="${prof.id}">Equipar</button>` : `<span class="passive-tag">${prof.type === 'gather' ? 'Siempre disponible' : 'Sin equipar'}</span>`}
             `;
             bagSection.appendChild(div);
 
@@ -385,6 +544,15 @@ const UI = {
                 if (this.onUseTeleportScroll) this.onUseTeleportScroll();
             });
         });
+        list.querySelectorAll('[data-use-alteracion]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (this.onUseAlteracionScroll) this.onUseAlteracionScroll(parseInt(btn.dataset.useAlteracion, 10));
+            });
+        });
+        const goldChip = list.querySelector('[data-open-gold]');
+        if (goldChip) {
+            goldChip.addEventListener('click', () => this.showGoldPanel(player));
+        }
         list.querySelectorAll('[data-use-food]').forEach(btn => {
             btn.addEventListener('click', () => {
                 const [foodId, rarityId] = btn.dataset.useFood.split('__');
@@ -1096,7 +1264,7 @@ const UI = {
         const summaryEl = document.getElementById('victory-summary');
         summaryEl.innerHTML = loot.defeated.map(d => `<span class="victory-chip">${d.emoji} ${d.name}</span>`).join('');
 
-        document.getElementById('victory-xp').textContent = `+${loot.xp} XP`;
+        document.getElementById('victory-xp').textContent = `+${loot.xp} XP` + (loot.gold ? `   +${loot.gold} 🪙` : '');
 
         const dropsEl = document.getElementById('victory-drops');
         const materialIds = Object.keys(loot.materials);
@@ -1120,6 +1288,207 @@ const UI = {
 
     hideVictoryPanel() {
         document.getElementById('victory-panel').classList.add('hidden');
+    },
+
+    // Panel de precisión de Oro: se abre al hacer click en el chip de Oro
+    // del inventario y muestra el valor exacto (sin abreviar K/M).
+    showGoldPanel(player) {
+        document.getElementById('gold-exact-value').textContent = `🪙 ${formatGoldExact(player.gold)}`;
+        document.getElementById('gold-panel').classList.remove('hidden');
+    },
+
+    hideGoldPanel() {
+        document.getElementById('gold-panel').classList.add('hidden');
+    },
+
+    // Menú (tecla ESC cuando no hay ninguna otra ventana abierta, ver game.js).
+    showMenuPanel() {
+        document.getElementById('menu-panel').classList.remove('hidden');
+    },
+
+    hideMenuPanel() {
+        document.getElementById('menu-panel').classList.add('hidden');
+    },
+
+    // ----- MERCADER DE LA TABERNA (ver SISTEMA DE TABERNA, shop.js) -----
+    // Etiqueta legible de un lote vendido por el jugador (bloque derecho,
+    // "Comprar") o de un objeto en el inventario del jugador (bloque
+    // izquierdo, "Vender"): reusa los mismos helpers de nombre que el resto
+    // del inventario (getMaterialInfo/getWeaponName/getMountDef).
+    getShopItemLabel(entry) {
+        // entry: { type, materialId?, item? }
+        if (entry.type === 'material') {
+            const info = getMaterialInfo(entry.materialId);
+            return { name: info.name, emoji: info.emoji, sub: '' };
+        }
+        const item = entry.item;
+        const rarity = getMonsterRarity(item.rarityId);
+        const tier = TIERS.find(t => t.id === item.tierId);
+        if (entry.type === 'weapon' || entry.type === 'armor') {
+            const prof = getProfession(item.profId);
+            const statLabel = item.kind === 'armor' ? `DEF ${item.defense}` : `⚔ ${item.damage}`;
+            return {
+                name: `${getWeaponName(item.profId, item.tierId)} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}`,
+                emoji: prof ? prof.emoji : '❔',
+                sub: `${statLabel} · ${rarity.name}`,
+                color: rarity.color,
+            };
+        }
+        // mount
+        const def = getMountDef(item.tierId);
+        return {
+            name: `${def ? def.name : 'Montura'} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}`,
+            emoji: MOUNT_INVENTORY_EMOJI,
+            sub: `🏃 +${item.speedPercent}% velocidad · ${rarity.name}`,
+            color: rarity.color,
+        };
+    },
+
+    showShopPanel(player) {
+        this.renderShopPanel(player);
+        document.getElementById('shop-panel').classList.remove('hidden');
+    },
+
+    hideShopPanel() {
+        document.getElementById('shop-panel').classList.add('hidden');
+    },
+
+    renderShopPanel(player) {
+        document.getElementById('shop-gold').textContent = `🪙 ${formatGoldExact(player.gold)}`;
+
+        // ----- BLOQUE IZQUIERDO: inventario del jugador (vender) -----
+        const sellEl = document.getElementById('shop-sell-list');
+        sellEl.innerHTML = '';
+
+        const sellableMaterialIds = Object.keys(player.materials).filter(id => player.materials[id] > 0 && isMaterialSellable(id));
+        sellableMaterialIds.forEach(id => {
+            const info = getMaterialInfo(id);
+            const qty = player.materials[id];
+            const unitPrice = getMaterialUnitSellPrice(id);
+            const row = document.createElement('div');
+            row.className = 'shop-row';
+            row.innerHTML = `
+                <div class="item-emoji">${info.emoji}</div>
+                <div class="item-info">
+                    <div class="item-name">${info.name}</div>
+                    <div class="item-sub">x${qty} · ${unitPrice} 🪙 c/u</div>
+                </div>
+                <button class="shop-btn" data-sell-material="${id}" data-sell-qty="1">Vender</button>
+                <button class="shop-btn shop-btn-alt" data-sell-material="${id}" data-sell-qty="${qty}">Vender Todo</button>
+            `;
+            sellEl.appendChild(row);
+        });
+
+        player.craftedItems.forEach(item => {
+            const label = this.getShopItemLabel({ type: item.kind, item });
+            const price = getCraftedItemSellPrice(item);
+            const row = document.createElement('div');
+            row.className = 'shop-row';
+            row.innerHTML = `
+                <div class="item-emoji">${label.emoji}</div>
+                <div class="item-info">
+                    <div class="item-name" style="color:${label.color}">${label.name}</div>
+                    <div class="item-sub">${label.sub} · ${price} 🪙</div>
+                </div>
+                <button class="shop-btn" data-sell-item="${item.id}">Vender</button>
+            `;
+            sellEl.appendChild(row);
+        });
+
+        player.mounts.forEach(mount => {
+            const label = this.getShopItemLabel({ type: 'mount', item: mount });
+            const price = getMountSellPrice(mount);
+            const row = document.createElement('div');
+            row.className = 'shop-row';
+            row.innerHTML = `
+                <div class="item-emoji">${label.emoji}</div>
+                <div class="item-info">
+                    <div class="item-name" style="color:${label.color}">${label.name}</div>
+                    <div class="item-sub">${label.sub} · ${price} 🪙</div>
+                </div>
+                <button class="shop-btn" data-sell-mount="${mount.id}">Vender</button>
+            `;
+            sellEl.appendChild(row);
+        });
+
+        if (!sellableMaterialIds.length && !player.craftedItems.length && !player.mounts.length) {
+            sellEl.innerHTML = '<div class="panel-note">No tenés nada vendible.</div>';
+        }
+
+        // ----- BLOQUE DERECHO: tienda del Mercader (comprar) -----
+        const buyEl = document.getElementById('shop-buy-list');
+        buyEl.innerHTML = '';
+
+        const scrollInfo = getMaterialInfo('pergamino_teletransporte');
+        const scrollRow = document.createElement('div');
+        scrollRow.className = 'shop-row';
+        scrollRow.innerHTML = `
+            <div class="item-emoji">${scrollInfo.emoji}</div>
+            <div class="item-info">
+                <div class="item-name">${scrollInfo.name}</div>
+                <div class="item-sub">Infinito · ${SHOP_SCROLL_PRICE} 🪙</div>
+            </div>
+            <button class="shop-btn" data-buy-scroll="1">Comprar</button>
+        `;
+        buyEl.appendChild(scrollRow);
+
+        player.merchantListings.forEach(listing => {
+            const label = this.getShopItemLabel(listing);
+            const qtyLabel = listing.type === 'material' ? `x${listing.qty} · ` : '';
+            const row = document.createElement('div');
+            row.className = 'shop-row';
+            row.innerHTML = `
+                <div class="item-emoji">${label.emoji}</div>
+                <div class="item-info">
+                    <div class="item-name" style="color:${label.color || ''}">${label.name}</div>
+                    <div class="item-sub">${qtyLabel}${listing.price} 🪙</div>
+                </div>
+                <button class="shop-btn" data-buy-listing="${listing.id}">Comprar</button>
+            `;
+            buyEl.appendChild(row);
+        });
+
+        // ----- Handlers (re-atados en cada render, como el resto de los paneles) -----
+        sellEl.querySelectorAll('[data-sell-material]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                player.sellMaterial(btn.dataset.sellMaterial, parseInt(btn.dataset.sellQty, 10));
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        sellEl.querySelectorAll('[data-sell-item]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                player.sellCraftedItem(btn.dataset.sellItem);
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        sellEl.querySelectorAll('[data-sell-mount]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                player.sellMount(btn.dataset.sellMount);
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        buyEl.querySelectorAll('[data-buy-scroll]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (!player.buyScroll()) { this.showLevelToastText('❌ Oro insuficiente o pergaminos al máximo'); return; }
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        buyEl.querySelectorAll('[data-buy-listing]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (!player.buyListing(btn.dataset.buyListing)) { this.showLevelToastText('❌ Oro insuficiente'); return; }
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
     },
 
     // Ventana de estadísticas (tecla V): Potencia/Destreza/Suerte/
@@ -1206,7 +1575,7 @@ const UI = {
     // con un Pergamino de Teletransportación. El estado de navegación
     // (_floorsLevel/_floorsTier/_floorsRango) persiste entre aperturas del
     // panel, igual que el modo del panel de Crafteo.
-    renderFloors(player) {
+    renderFloors(player, inTaberna, floorBeforeTaberna) {
         if (!this._floorsLevel) this._floorsLevel = 1;
 
         const bodyEl = document.getElementById('floors-body');
@@ -1220,6 +1589,21 @@ const UI = {
             <div class="floors-info-row">Piso Máximo: <b>${player.maxFloorReached}</b></div>
         `;
         bodyEl.appendChild(info);
+
+        // Taberna (ver SISTEMA DE TABERNA en game.js): acceso directo sin
+        // costo desde cualquier piso, o botón de regreso si ya se está
+        // adentro. Siempre visible arriba de todo, en cualquier nivel de
+        // navegación (rangos/pisos individuales).
+        const tabernaBtn = document.createElement('button');
+        tabernaBtn.className = 'floors-taberna-btn';
+        if (inTaberna) {
+            tabernaBtn.textContent = `⬅ Volver al Piso ${floorBeforeTaberna || 1}`;
+            tabernaBtn.addEventListener('click', () => { if (this.onExitTaberna) this.onExitTaberna(); });
+        } else {
+            tabernaBtn.textContent = '🍺 TABERNA';
+            tabernaBtn.addEventListener('click', () => { if (this.onEnterTaberna) this.onEnterTaberna(); });
+        }
+        bodyEl.appendChild(tabernaBtn);
 
         if (this._floorsLevel !== 1) {
             const backBtn = document.createElement('button');
@@ -1316,6 +1700,25 @@ const UI = {
             <div class="guide-section">
                 <div class="guide-section-title">${title}</div>
                 ${bodyHTML}
+            </div>
+        `;
+
+        // ----- 0) Controles (antes en la barra inferior, ver #hint-bar) -----
+        const controlesHTML = `
+            <div class="guide-controls-list">
+                <div class="guide-control-row"><b>WASD / Flechas</b><span>Mover</span></div>
+                <div class="guide-control-row"><b>Click / Espacio</b><span>Combate / Recolectar</span></div>
+                <div class="guide-control-row"><b>Click / Espacio</b><span>cerca del Portal 🌀</span></div>
+                <div class="guide-control-row"><b>I</b><span>Inventario</span></div>
+                <div class="guide-control-row"><b>E</b><span>Encantar</span></div>
+                <div class="guide-control-row"><b>M</b><span>Mapa</span></div>
+                <div class="guide-control-row"><b>C</b><span>Crafteo</span></div>
+                <div class="guide-control-row"><b>V</b><span>Estadísticas</span></div>
+                <div class="guide-control-row"><b>P</b><span>Pisos</span></div>
+                <div class="guide-control-row"><b>G</b><span>Guía</span></div>
+                <div class="guide-control-row"><b>ESC</b><span>Menú (o cerrar la ventana abierta)</span></div>
+                <div class="guide-control-row"><b>1-3 / Espacio</b><span>Ataques / Pasar turno (en combate)</span></div>
+                <div class="guide-control-row"><b>G</b><span>Poción (en combate)</span></div>
             </div>
         `;
 
@@ -1451,6 +1854,7 @@ const UI = {
         `;
 
         el.innerHTML =
+            section('🎮 Controles', controlesHTML) +
             section('📊 Niveles y Tiers del jugador', nivelesHTML) +
             section('🏰 Pisos y Tiers de recursos', pisosHTML) +
             section('💠 Núcleos de Monstruo', nucleosHTML) +

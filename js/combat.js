@@ -50,7 +50,7 @@ const Combat = {
         this.enemies = enemyList;
         this.onResolve = onResolve;
         this.log = [];
-        this.loot = { xp: 0, defeated: [], materials: {} };
+        this.loot = { xp: 0, gold: 0, defeated: [], materials: {} };
         this.xpPenalty = 1;
         this.player.shield = null;
         this.playerAP = BASE_AP + this.player.getFoodPABonus();
@@ -889,6 +889,14 @@ const Combat = {
         const rarity = target.type.rarity || MONSTER_RARITIES[0];
         const bossKind = target.type.bossKind; // undefined | 'minijefe'|'jefe'|'jefe_final'|'jefe_especial'|'jefe_aleatorio'
 
+        // Tamaño de "grupo" (ver GROUP_LOOT_MULT en constants.js): la
+        // cantidad de enemigos con la que arrancó ESTE combate
+        // (this.enemies no se achica al morir, solo cambia `.alive`), no se
+        // recalcula si alguno muere antes que este.
+        const groupSize = this.enemies.length;
+        const groupMult = getGroupMultiplier(groupSize);
+        const gm = qty => Math.max(1, Math.round(qty * groupMult));
+
         // XP por enemigo: 10 × Piso × Multiplicador_Rareza × Escala_Minijefe_Jefe
         // (ver getEnemyXPReward en constants.js) — reemplaza el viejo
         // target.type.xp escalado por piso.
@@ -897,14 +905,31 @@ const Combat = {
         this.loot.xp += xpGain;
         this.loot.defeated.push({ emoji: target.type.emoji, name: target.type.name });
 
+        // Oro: Piso × Multiplicador_Tier ±10% × Tipo × Rareza × Grupo (ver
+        // getEnemyGoldReward en constants.js). El multiplicador de grupo ya
+        // está incluido adentro de esta función (no se aplica `gm` de nuevo).
+        const goldGain = getEnemyGoldReward(player.floor, rarity.id, bossKind, groupSize);
+        player.gainGold(goldGain);
+        this.loot.gold = (this.loot.gold || 0) + goldGain;
+
         const materialTierId = getMaterialTierForFloor(player.floor);
         const rarityIdx = MONSTER_RARITIES.findIndex(r => r.id === rarity.id);
 
         // Pergaminos de teletransportación: solo los sueltan enemigos de
-        // rareza Poco Común o superior.
+        // rareza Poco Común o superior (probabilidad binaria, no escala con grupo).
         if (rarityIdx >= 1 && Math.random() < 0.08) {
             this.grantMaterial('pergamino_teletransporte', 1);
             this.addLog('📜 ¡Consigues un Pergamino de Teletransportación!');
+        }
+
+        // Pergaminos de Alteración: chance por rareza/tipo de enemigo (ver
+        // getAlteracionDropInfo en constants.js); el Jefe Final SIEMPRE
+        // dropa 1-3 (no escala con grupo, igual que el de teletransportación).
+        const alteracion = getAlteracionDropInfo(rarity.id, bossKind);
+        if (alteracion.guaranteed || Math.random() < alteracion.chance) {
+            const qty = alteracion.guaranteed ? (1 + Math.floor(Math.random() * 3)) : 1;
+            this.grantMaterial(`pergamino_alteracion_tier${alteracion.tier}`, qty);
+            this.addLog(`☢️ ¡Consigues ${qty > 1 ? qty + ' ' : ''}Pergamino${qty > 1 ? 's' : ''} de Alteración Tier ${alteracion.tier}!`);
         }
 
         // Núcleos de monstruo: drop progresivo según el piso (se reinicia
@@ -912,8 +937,8 @@ const Combat = {
         // enchantments.js), de la misma Rareza que el enemigo y el Tier de
         // material del piso actual. Los jefes suman bonus adicional encima.
         const { tierId: nucleoTierId, count: nucleoCount } = rollNucleoDrops(player.floor);
-        this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), nucleoCount);
-        if (nucleoCount > 1) this.addLog(`💠 +${nucleoCount} Núcleos ${rarity.name} Tier ${nucleoTierId}`);
+        this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(nucleoCount));
+        if (nucleoCount > 1) this.addLog(`💠 +${gm(nucleoCount)} Núcleos ${rarity.name} Tier ${nucleoTierId}`);
 
         if (bossKind === 'jefe_final') {
             // Loot fijo y masivo, del Tier donde apareció (ver
@@ -922,18 +947,18 @@ const Combat = {
             // haya aparecido (pisoEnRango 1 = más débil/menos loot, 10 =
             // más fuerte/más loot); los núcleos son cantidad fija.
             const pisoEnRango = target.type.pisoEnRango || 10;
-            const resourceQty = Math.round(50 + ((pisoEnRango - 1) / 9) * 150);
+            const resourceQty = gm(Math.round(50 + ((pisoEnRango - 1) / 9) * 150));
             this.grantMaterial(`mat_tier_${materialTierId}`, resourceQty);
             this.grantMaterial(`madera_tier_${materialTierId}`, resourceQty);
 
             // 90 núcleos Común/Poco Común/Raro (reparto fijo 45/30/15).
-            this.grantMaterial(getNucleoId('comun', materialTierId), 45);
-            this.grantMaterial(getNucleoId('poco_comun', materialTierId), 30);
-            this.grantMaterial(getNucleoId('raro', materialTierId), 15);
+            this.grantMaterial(getNucleoId('comun', materialTierId), gm(45));
+            this.grantMaterial(getNucleoId('poco_comun', materialTierId), gm(30));
+            this.grantMaterial(getNucleoId('raro', materialTierId), gm(15));
 
             // 10 núcleos Épico o superior, con garantía de 1 Mítico; los
             // otros 9 se sortean entre Épico/Legendario/Mítico según peso.
-            this.grantMaterial(getNucleoId('mitico', materialTierId), 1);
+            this.grantMaterial(getNucleoId('mitico', materialTierId), gm(1));
             const altoPool = [
                 { id: 'epico', weight: 5 },
                 { id: 'legendario', weight: 1.5 },
@@ -947,32 +972,35 @@ const Combat = {
                     if (roll < p.weight) { chosen = p.id; break; }
                     roll -= p.weight;
                 }
-                this.grantMaterial(getNucleoId(chosen, materialTierId), 1);
+                this.grantMaterial(getNucleoId(chosen, materialTierId), gm(1));
             }
 
             this.addLog(`👑 ¡Jefe Final derrotado! Botín masivo obtenido (Tier ${materialTierId}, piso ${pisoEnRango}/10 del rango).`);
         } else if (bossKind === 'jefe') {
-            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), 5);
-            this.grantRandomTierMaterials(30, materialTierId);
+            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(5));
+            this.grantRandomTierMaterials(gm(30), materialTierId);
             if (rarityIdx >= 0 && rarityIdx < MONSTER_RARITIES.length - 1 && Math.random() < 0.10) {
-                this.grantMaterial(getNucleoId(MONSTER_RARITIES[rarityIdx + 1].id, nucleoTierId), 1);
+                this.grantMaterial(getNucleoId(MONSTER_RARITIES[rarityIdx + 1].id, nucleoTierId), gm(1));
                 this.addLog('✨ ¡Drop especial: núcleo de rareza superior!');
             }
         } else if (bossKind === 'minijefe') {
-            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), 5);
-            this.grantRandomTierMaterials(10, materialTierId);
+            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(5));
+            this.grantRandomTierMaterials(gm(10), materialTierId);
         } else if (bossKind === 'jefe_especial' || bossKind === 'jefe_aleatorio') {
             // Jefes de generación de piso (ver grid-dungeon.js).
-            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), 5);
-            this.grantRandomTierMaterials(20, materialTierId);
+            this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(5));
+            this.grantRandomTierMaterials(gm(20), materialTierId);
         }
 
-        // El XP ganado se resalta con el color de Rareza del enemigo (y en
-        // negrita a partir de Épico) para que se note la diferencia de un
-        // vistazo en el log de combate, que funciona como el "flotante" de
-        // XP en este panel modal por turnos (ver INTERFAZ Y FEEDBACK).
-        const xpStyle = `color:${rarity.color};${rarityIdx >= 3 ? 'font-weight:bold' : ''}`;
-        this.addLog(`💀 ${target.type.name} derrotado. <span style="${xpStyle}">+${xpGain} XP</span>`);
+        // El XP y el oro ganados se resaltan con color (Rareza del enemigo
+        // para XP, dorado para oro; negrita desde Épico) para que se note
+        // de un vistazo en el log de combate, que funciona como el
+        // "flotante" de XP/oro en este panel modal por turnos (ver
+        // INTERFAZ Y FEEDBACK).
+        const boldIfRare = rarityIdx >= 3 ? 'font-weight:bold' : '';
+        const xpStyle = `color:${rarity.color};${boldIfRare}`;
+        const goldStyle = `color:#ffd700;${boldIfRare}`;
+        this.addLog(`💀 ${target.type.name} derrotado. <span style="${xpStyle}">+${xpGain} XP</span> <span style="${goldStyle}">+${goldGain} 🪙</span>`);
         if (this.onKillHook) this.onKillHook(target);
     },
 

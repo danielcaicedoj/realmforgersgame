@@ -29,6 +29,12 @@ class Player {
         this.lastDamageTime = 0;
 
         this.materials = {}; // materialId -> cantidad (drops de enemigos)
+        this.gold = 0; // moneda ganada al derrotar enemigos (ver getEnemyGoldReward en constants.js)
+
+        // Mercader de la Taberna (ver SISTEMA DE TABERNA en game.js/shop.js):
+        // lotes vendidos por el jugador, disponibles para recomprar.
+        // [{id, type:'material'|'weapon'|'armor'|'mount', materialId?, qty?, item?, price, listedAt}]
+        this.merchantListings = [];
 
         this.floor = 1; // piso actual de la mazmorra (1-1000); NUNCA se persiste (ver ventana de Pisos, tecla P) — cada sesión arranca siempre en el piso 1
         this.maxFloorReached = 1; // piso más alto alcanzado alguna vez; persiste entre sesiones y define qué se puede teletransportar
@@ -36,8 +42,18 @@ class Player {
 
         // Jefe Final: puntos acumulados hacia FINAL_BOSS_POINTS_TARGET (ver
         // constants.js y game.js/handleEnemyKilled). Persiste entre pisos;
-        // se reinicia a 0 solo cuando se derrota al Jefe Final.
+        // se reinicia a 0 apenas aparece. bossHuntKills cuenta las muertes
+        // DESPUÉS de llegar a 100/100 (para el % de aparición del contador,
+        // ver getFinalBossSpawnChancePercent), se reinicia junto con los puntos.
         this.finalBossPoints = 0;
+        this.bossHuntKills = 0;
+
+        // Piso donde hay un Jefe Final activo ahora mismo (null = ninguno),
+        // ver SISTEMA DE NOTIFICACIÓN Y TELETRANSPORTE AL JEFE FINAL en
+        // game.js. Persiste aunque el jugador se vaya de ese piso — el
+        // enemigo en sí se descarta como cualquier otro (ver loadFloor),
+        // pero se re-materializa al volver vía teletransporte al jefe.
+        this.finalBossFloor = null;
 
         this.craftedItems = []; // [{id, kind:'weapon'|'armor', profId, tierId, rarityId, damage|defense}]
         this.equippedCraftedByProf = {}; // profId -> craftedItem.id (o null = usar el arma/armadura automática por nivel)
@@ -99,9 +115,13 @@ class Player {
         }
         if (typeof data.arrows === 'number') this.arrows = data.arrows;
         if (data.materials) this.materials = data.materials;
+        if (typeof data.gold === 'number') this.gold = data.gold;
+        if (Array.isArray(data.merchantListings)) this.merchantListings = data.merchantListings;
         if (typeof data.maxFloorReached === 'number') this.maxFloorReached = data.maxFloorReached;
         if (data.defeatedFloorBosses) this.defeatedFloorBosses = data.defeatedFloorBosses;
         if (typeof data.finalBossPoints === 'number') this.finalBossPoints = data.finalBossPoints;
+        if (typeof data.bossHuntKills === 'number') this.bossHuntKills = data.bossHuntKills;
+        if (typeof data.finalBossFloor === 'number') this.finalBossFloor = data.finalBossFloor;
         // Objetos crafteados de profesiones eliminadas (ej. Segador) se
         // descartan directamente en vez de quedar huérfanos en el bolso.
         if (Array.isArray(data.craftedItems)) {
@@ -628,6 +648,89 @@ class Player {
         }
     }
 
+    gainGold(amount) {
+        this.gold += amount;
+    }
+
+    // ----- MERCADER DE LA TABERNA (ver shop.js) -----
+    // Vende `qty` unidades de un material (núcleo/mena/madera/hierba/
+    // cultivo) apilable: crea UN lote en merchantListings por la cantidad
+    // total (no uno por unidad), consistente con "Vender Todo".
+    sellMaterial(materialId, qty) {
+        const have = this.materials[materialId] || 0;
+        qty = Math.min(qty, have);
+        if (qty <= 0 || !isMaterialSellable(materialId)) return null;
+        const price = getMaterialUnitSellPrice(materialId) * qty;
+        this.materials[materialId] -= qty;
+        this.gold += price;
+        const listing = {
+            id: 'lst_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            type: 'material', materialId, qty, price, listedAt: Date.now(),
+        };
+        this.merchantListings.push(listing);
+        return listing;
+    }
+
+    sellCraftedItem(itemId) {
+        const idx = this.craftedItems.findIndex(it => it.id === itemId);
+        if (idx === -1) return null;
+        const item = this.craftedItems[idx];
+        if (this.equippedCraftedByProf[item.profId] === item.id) this.equippedCraftedByProf[item.profId] = null;
+        const price = getCraftedItemSellPrice(item);
+        this.craftedItems.splice(idx, 1);
+        this.gold += price;
+        const listing = {
+            id: 'lst_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            type: item.kind, item, price, listedAt: Date.now(),
+        };
+        this.merchantListings.push(listing);
+        return listing;
+    }
+
+    sellMount(mountId) {
+        const idx = this.mounts.findIndex(m => m.id === mountId);
+        if (idx === -1) return null;
+        const mount = this.mounts[idx];
+        if (this.equippedMountId === mount.id) this.equippedMountId = null;
+        const price = getMountSellPrice(mount);
+        this.mounts.splice(idx, 1);
+        this.gold += price;
+        const listing = {
+            id: 'lst_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            type: 'mount', item: mount, price, listedAt: Date.now(),
+        };
+        this.merchantListings.push(listing);
+        return listing;
+    }
+
+    // Pergaminos: stock infinito, no vienen de merchantListings.
+    buyScroll() {
+        if ((this.materials.pergamino_teletransporte || 0) >= MAX_PERGAMINOS_TELETRANSPORTE) return false;
+        if (this.gold < SHOP_SCROLL_PRICE) return false;
+        this.gold -= SHOP_SCROLL_PRICE;
+        this.gainMaterial('pergamino_teletransporte', 1);
+        return true;
+    }
+
+    // Recompra un lote vendido (propio o de otra sesión, ver persistencia
+    // en storage.js): devuelve exactamente lo que se vendió y borra el lote.
+    buyListing(listingId) {
+        const idx = this.merchantListings.findIndex(l => l.id === listingId);
+        if (idx === -1) return false;
+        const listing = this.merchantListings[idx];
+        if (this.gold < listing.price) return false;
+        this.gold -= listing.price;
+        if (listing.type === 'material') {
+            this.gainMaterial(listing.materialId, listing.qty);
+        } else if (listing.type === 'weapon' || listing.type === 'armor') {
+            this.craftedItems.push(listing.item);
+        } else if (listing.type === 'mount') {
+            this.mounts.push(listing.item);
+        }
+        this.merchantListings.splice(idx, 1);
+        return true;
+    }
+
     // XP unificada: un único nivel de jugador (no uno por arma). Cada level
     // up otorga STAT_POINTS_PER_LEVEL puntos de estadística para repartir,
     // +10 de vida máxima permanente, y cura al jugador al 100%.
@@ -696,7 +799,22 @@ class Player {
         this.hp = Math.min(this.maxHp, this.hp + amount);
     }
 
+    // Equipa el arma "inicial" (automática por nivel) de una profesión de
+    // combate. Igual que equipCraftedItem, desequipa cualquier arma
+    // crafteada de OTRA profesión de combate: solo un arma puede estar
+    // "equipada" (crafteada o no) a la vez (bug fix: antes esto no limpiaba
+    // equippedCraftedByProf, dejando el arma crafteada anterior marcada
+    // como equipada — mostraba "Quitar" — aunque ya no fuera la activa).
     setActiveProfession(id) {
-        if (getProfession(id)) this.activeProfession = id;
+        const prof = getProfession(id);
+        if (!prof) return;
+        if (prof.type === 'combat' || prof.type === 'combat_ranged' || prof.type === 'combat_block') {
+            PROFESSIONS.forEach(p => {
+                if (p.type === 'combat' || p.type === 'combat_ranged' || p.type === 'combat_block') {
+                    this.equippedCraftedByProf[p.id] = null;
+                }
+            });
+        }
+        this.activeProfession = id;
     }
 }
