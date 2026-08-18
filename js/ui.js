@@ -1,10 +1,12 @@
 // ===== INTERFAZ DE USUARIO (HUD + PANELES) =====
 
-// HTML con el daño (y costo) de cada ataque del arma de ese tier, para
+// HTML con el daño (y cooldown) de cada ataque del arma de ese tier, para
 // mostrarlo en el inventario junto al arma equipada. `mult` aplica el bono
 // de rareza de un objeto crafteado (1 = sin bono, arma automática por nivel).
-function buildAttacksHTML(profId, tierId, mult) {
+// Ver SISTEMA DE COMBATE EN TIEMPO REAL: click izq/der + mantener R.
+function buildAttacksHTML(profId, tierId, mult, level) {
     const base = getWeaponAttacksForTier(profId, tierId);
+    const controlLabels = ['🖱️Izq', '🖱️Der', 'R'];
     if (base) {
         const real = scaleAttacksByMult(base, mult || 1);
         return [...real.basic, real.special].map((atk, idx) => {
@@ -12,8 +14,8 @@ function buildAttacksHTML(profId, tierId, mult) {
             let dmgLabel = `${atk.damage} dmg`;
             if (atk.hits) dmgLabel = `${atk.damage} dmg x${atk.hits}`;
             if (atk.aoe) dmgLabel += ' (AoE)';
-            let costLabel = `${atk.apCost} PA`;
-            if (isSpecial) costLabel += ` · Carga ${atk.chargeRequired}`;
+            const cooldownS = (getAttackCooldownMs(profId, idx, level) / 1000).toFixed(1).replace(/\.0$/, '');
+            const costLabel = isSpecial ? `${controlLabels[idx]} · 10 cargas · CD ${cooldownS}s` : `${controlLabels[idx]} · CD ${cooldownS}s`;
             return `<div class="atk-line">${atk.emoji} <b>${atk.name}</b> — ${dmgLabel} · ${costLabel}</div>`;
         }).join('');
     }
@@ -49,9 +51,6 @@ const UI = {
             btn.addEventListener('click', () => this.hidePanel(btn.dataset.close));
         });
 
-        document.getElementById('combat-endturn-btn').addEventListener('click', () => Combat.playerEndTurn());
-        document.getElementById('victory-continue-btn').addEventListener('click', () => this.triggerVictoryContinue());
-
         // Menú (tecla ESC sin ninguna otra ventana abierta, ver game.js):
         // por ahora un solo item, acceso directo a la Guía.
         document.getElementById('menu-guide-btn').addEventListener('click', () => {
@@ -65,24 +64,6 @@ const UI = {
             if (this.onConfirmBossTeleport) this.onConfirmBossTeleport();
         });
         document.getElementById('boss-teleport-cancel-btn').addEventListener('click', () => this.hideBossTeleportPanel());
-    },
-
-    isVictoryPanelVisible() {
-        const panel = document.getElementById('victory-panel');
-        return !!panel && !panel.classList.contains('hidden');
-    },
-
-    // Acción de "Continuar" de la ventana de Victoria: compartida por el
-    // click del botón y por la tecla Espacio (ver game.js). El propio
-    // ocultamiento del panel funciona como debounce — una vez oculto, una
-    // segunda pulsación de Espacio ya no encuentra el panel visible.
-    triggerVictoryContinue() {
-        if (!this.isVictoryPanelVisible()) return;
-        const btn = document.getElementById('victory-continue-btn');
-        btn.classList.add('key-pressed');
-        setTimeout(() => btn.classList.remove('key-pressed'), 150);
-        this.hideVictoryPanel();
-        Combat.finish('victory');
     },
 
     hidePanel(id) {
@@ -312,7 +293,7 @@ const UI = {
         const weaponRarity = craftedWeapon ? getMonsterRarity(craftedWeapon.rarityId) : null;
         const weaponDiv = document.createElement('div');
         weaponDiv.className = 'inv-item active';
-        const attacksHTML = buildAttacksHTML(activeProf.id, weaponTier.id, weaponRarity ? weaponRarity.mult : 1);
+        const attacksHTML = buildAttacksHTML(activeProf.id, weaponTier.id, weaponRarity ? weaponRarity.mult : 1, player.level);
         weaponDiv.innerHTML = `
             <div class="item-emoji">${activeProf.emoji}</div>
             <div class="item-info">
@@ -352,13 +333,14 @@ const UI = {
 
             player.foodBuffs.forEach(b => {
                 const label = FOOD_STAT_LABELS[b.stat];
+                const minsLeft = Math.max(0, Math.ceil((b.expiresAt - Date.now()) / 60000));
                 const div = document.createElement('div');
                 div.className = 'inv-item';
                 div.innerHTML = `
                     <div class="item-emoji">${b.emoji}</div>
                     <div class="item-info">
                         <div class="item-name">${b.name}</div>
-                        <div class="item-sub">+${b.amount} ${label.icon} ${label.name}${b.turnRegen ? ` · +${b.turnRegen} HP/turno` : ''} · ${b.combatsLeft} combate${b.combatsLeft === 1 ? '' : 's'} restante${b.combatsLeft === 1 ? '' : 's'}</div>
+                        <div class="item-sub">+${b.amount} ${label.icon} ${label.name}${b.turnRegen ? ` · +${b.turnRegen} HP/seg` : ''} · ${minsLeft} min restante${minsLeft === 1 ? '' : 's'}</div>
                     </div>
                 `;
                 buffsSection.appendChild(div);
@@ -1102,192 +1084,70 @@ const UI = {
         });
     },
 
-    showCombatPanel() {
-        ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel'].forEach(p => document.getElementById(p).classList.add('hidden'));
-        document.getElementById('combat-panel').classList.remove('hidden');
-    },
+    // ----- HUD DE COMBATE EN TIEMPO REAL (ver combat.js) -----
+    // Llamado cada frame desde game.js/update(): 3 círculos de cooldown
+    // (Ataque1/2/3), barra de carga universal (0-10) y panel del enemigo
+    // vivo más cercano. Reemplaza la vieja pantalla modal de combate por
+    // turnos.
+    updateCombatHUD(player, inTaberna) {
+        const hudEl = document.getElementById('combat-hud');
+        const nearbyEl = document.getElementById('nearby-enemy-panel');
+        if (inTaberna) {
+            if (hudEl) hudEl.classList.add('hidden');
+            if (nearbyEl) nearbyEl.classList.add('hidden');
+            return;
+        }
+        if (hudEl) hudEl.classList.remove('hidden');
 
-    hideCombatPanel() {
-        document.getElementById('combat-panel').classList.add('hidden');
-    },
+        const now = Date.now();
+        for (let i = 0; i < 3; i++) {
+            const circle = document.getElementById(`cd-circle-${i}`);
+            const timerEl = document.getElementById(`cd-timer-${i}`);
+            if (!circle) continue;
+            const total = getAttackCooldownMs(player.activeProfession, i, player.level);
+            const remaining = Math.max(0, Combat.cooldownUntil[i] - now);
+            const pct = total > 0 ? Math.min(1, remaining / total) : 0;
+            const specialReady = i < 2 || Combat.charge >= RT_CHARGE_MAX;
+            const ready = remaining <= 0 && specialReady;
+            circle.classList.toggle('ready', ready);
+            circle.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
+            if (remaining > 0) {
+                timerEl.textContent = (remaining / 1000).toFixed(1);
+            } else if (i === 2) {
+                timerEl.textContent = `${Combat.charge}/${RT_CHARGE_MAX}`;
+            } else {
+                timerEl.textContent = '✓';
+            }
+        }
 
-    renderCombat(combat) {
-        const enemiesEl = document.getElementById('combat-enemies');
-        enemiesEl.innerHTML = '';
-        combat.enemies.forEach(en => {
-            const pct = Math.max(0, (en.hp / en.maxHp) * 100);
-            const isDead = !en.alive;
-            const isSelected = !isDead && combat.selectedTarget === en;
-            const statusIcons = [
-                en.burn ? '🔥' : '',
-                en.bleed ? '🩸' : '',
-                en.stunned ? '😵' : '',
-                en.defenseMod && en.defenseMod.turnsLeft > 0 ? '🛡️⬇️' : '',
-                en.attackMod && en.attackMod.turnsLeft > 0 ? '⚔️⬇️' : '',
-            ].filter(Boolean).join(' ');
+        const chargePct = Math.min(100, (Combat.charge / RT_CHARGE_MAX) * 100);
+        const chargeFill = document.getElementById('charge-bar-fill');
+        if (chargeFill) chargeFill.style.width = `${chargePct}%`;
+        const chargeText = document.getElementById('charge-bar-text');
+        if (chargeText) chargeText.textContent = `Cargas: ${Combat.charge}/${RT_CHARGE_MAX}`;
 
-            const div = document.createElement('div');
-            div.className = 'combat-enemy-card' + (isSelected ? ' selected' : '') + (isDead ? ' dead' : '');
-            const rarity = en.type.rarity;
-            if (rarity && !isDead && !isSelected) div.style.borderColor = rarity.color;
-            div.innerHTML = `
-                <div class="combat-enemy-emoji">${isDead ? '💀' : en.type.emoji}</div>
-                <div class="combat-enemy-name">${en.type.name}</div>
-                ${rarity ? `<div class="combat-rarity-tag" style="color:${rarity.color}">${rarity.name}</div>` : ''}
-                <div class="mini-bar-track"><div class="mini-bar-fill hp-fill" style="width:${pct}%"></div></div>
-                <div class="combat-hp-text">${Math.round(en.hp)}/${en.maxHp} HP</div>
-                ${statusIcons ? `<div class="combat-status-icons">${statusIcons}</div>` : ''}
-            `;
-            if (!isDead) div.addEventListener('click', () => Combat.selectTarget(en));
-            enemiesEl.appendChild(div);
-        });
-
-        const playerEl = document.getElementById('combat-player');
-        const player = combat.player;
-        const prof = player.getActiveProfessionDef();
-        const hpPct = Math.max(0, (player.hp / player.maxHp) * 100);
-        const shieldTag = player.shield ? ` · 🛡️+${Math.round(player.shield.amount)} (${player.shield.turnsLeft}t)` : '';
-        const resistenciaCharges = combat.classCharge.prof === 'tanque' ? combat.classCharge.count : 0;
-        const resistenciaTag = resistenciaCharges > 0 ? ` · 🔰x${resistenciaCharges}` : '';
-        const tauntTag = combat.tauntTurnsLeft > 0 ? ` · 😤Taunt (${combat.tauntTurnsLeft}t)` : '';
-        playerEl.innerHTML = `
-            <div class="combat-enemy-emoji">🟣</div>
-            <div class="combat-player-info">
-                <div class="combat-enemy-name">${prof.emoji} ${prof.name} (Tú)</div>
-                <div class="mini-bar-track"><div class="mini-bar-fill hp-fill" style="width:${hpPct}%"></div></div>
-                <div class="combat-hp-text">${Math.round(player.hp)}/${player.maxHp} HP${shieldTag}${resistenciaTag}${tauntTag}</div>
-            </div>
-        `;
-
-        const orderEl = document.getElementById('combat-turn-order');
-        orderEl.innerHTML = combat.order.map((entry, i) => {
-            const isCurrent = i === combat.turnIndex && combat.active;
-            const isDeadEnemy = entry.kind === 'enemy' && !entry.ref.alive;
-            const emoji = entry.kind === 'player' ? prof.emoji : entry.ref.type.emoji;
-            return `<span class="turn-chip${isCurrent ? ' current' : ''}${isDeadEnemy ? ' dead' : ''}" title="Iniciativa ${entry.initiative}">${emoji}</span>`;
-        }).join('');
-
-        const logEl = document.getElementById('combat-log');
-        logEl.innerHTML = combat.log.map(l => `<div>${l}</div>`).join('');
-        logEl.scrollTop = logEl.scrollHeight;
-
-        const isPlayerTurn = combat.active && combat.isPlayerTurn();
-
-        // Pociones: no gastan PA, máximo 1 por turno y 3 por combate (aunque
-        // el bolso tenga más).
-        const potionsEl = document.getElementById('combat-potions');
-        potionsEl.innerHTML = '';
-        const potionIds = combat.active
-            ? Object.keys(combat.player.materials).filter(id => id.startsWith('pocion_') && combat.player.materials[id] > 0)
-            : [];
-        if (potionIds.length) {
-            const info = document.createElement('div');
-            info.className = 'combat-potion-info';
-            info.textContent = `🧪 Pociones disponibles este combate: ${combat.potionUsesLeft}/3`;
-            potionsEl.appendChild(info);
-
-            const row = document.createElement('div');
-            row.className = 'combat-potion-row';
-            potionIds.forEach(id => {
-                const rarityId = id.slice('pocion_'.length);
-                const rarity = getMonsterRarity(rarityId);
-                const qty = combat.player.materials[id];
-                const btn = document.createElement('button');
-                btn.className = 'combat-btn potion-btn';
-                btn.style.borderColor = rarity.color;
-                btn.disabled = !isPlayerTurn || combat.usedPotionThisTurn || combat.potionUsesLeft <= 0;
-                btn.innerHTML = `🧪 ${rarity.name} (x${qty})<span class="attack-cost">+${getPotionHealAmount(rarityId)} HP</span>`;
-                btn.addEventListener('click', () => Combat.usePotionInCombat(rarityId));
-                row.appendChild(btn);
+        // Enemigo vivo más cercano (dentro de un radio de referencia), con
+        // su nombre/rareza/HP en tiempo real.
+        const panel = document.getElementById('nearby-enemy-panel');
+        if (panel) {
+            let nearest = null, bestDist = Infinity;
+            Combat.enemies.forEach(en => {
+                if (!en.alive) return;
+                const d = Math.hypot(en.x - player.x, en.y - player.y);
+                if (d < bestDist && d <= 500) { bestDist = d; nearest = en; }
             });
-            potionsEl.appendChild(row);
+            if (nearest) {
+                panel.classList.remove('hidden');
+                const rarity = nearest.type.rarity;
+                document.getElementById('nearby-enemy-name').innerHTML =
+                    `${nearest.type.emoji} ${nearest.type.name}${rarity ? ` <span style="color:${rarity.color}">${rarity.name}</span>` : ''}`;
+                const pct = Math.max(0, (nearest.hp / nearest.maxHp) * 100);
+                document.getElementById('nearby-enemy-hp-fill').style.width = `${pct}%`;
+                document.getElementById('nearby-enemy-hp-text').textContent = `${Math.round(nearest.hp)}/${nearest.maxHp} HP`;
+            } else {
+                panel.classList.add('hidden');
+            }
         }
-
-        const weaponAttacks = combat.active ? combat.getActiveWeaponAttacks() : null;
-        const apInfoEl = document.getElementById('combat-ap-info');
-
-        const attacksEl = document.getElementById('combat-attacks');
-        attacksEl.innerHTML = '';
-
-        if (weaponAttacks) {
-            apInfoEl.classList.remove('hidden');
-            const maxAP = BASE_AP + combat.player.getFoodPABonus();
-            // El especial del Pícaro no tiene chargeRequired (solo PA, ver
-            // weapon-attacks.js), así que el chip de Carga se omite para él.
-            const chargeInfo = weaponAttacks.special.chargeRequired
-                ? `   ✨ Carga: ${combat.playerCharge}/${weaponAttacks.special.chargeRequired}` : '';
-            apInfoEl.textContent = `⚡ PA: ${combat.playerAP}/${maxAP}${chargeInfo}`;
-
-            [...weaponAttacks.basic, weaponAttacks.special].forEach((atk, idx) => {
-                const isSpecial = idx === 2;
-                const hasArrows = !atk.arrowCost || combat.player.arrows >= atk.arrowCost;
-                const affordable = combat.playerAP >= atk.apCost && hasArrows && (!isSpecial || !atk.chargeRequired || combat.playerCharge >= atk.chargeRequired);
-                const btn = document.createElement('button');
-                btn.className = 'combat-btn attack-btn' + (isSpecial ? ' special-btn' : '');
-                btn.disabled = !isPlayerTurn || !affordable;
-                let costLabel = `${atk.apCost} PA`;
-                if (isSpecial && atk.chargeRequired) costLabel += ` · Carga ${combat.playerCharge}/${atk.chargeRequired}`;
-                if (atk.arrowCost) costLabel += ` · 🏹${atk.arrowCost}`;
-                btn.innerHTML = `${atk.emoji} ${atk.name}<span class="attack-cost">${costLabel}</span>`;
-                btn.addEventListener('click', () => Combat.playerAttack(idx));
-                attacksEl.appendChild(btn);
-            });
-        } else {
-            apInfoEl.classList.add('hidden');
-            getAttacksForProfession(prof.id).forEach((atk, idx) => {
-                const btn = document.createElement('button');
-                btn.className = 'combat-btn attack-btn';
-                btn.disabled = !isPlayerTurn;
-                btn.innerHTML = `${atk.emoji} ${atk.name}`;
-                btn.title = atk.desc || '';
-                btn.addEventListener('click', () => Combat.playerAttack(idx));
-                attacksEl.appendChild(btn);
-            });
-        }
-
-        document.getElementById('combat-endturn-btn').disabled = !isPlayerTurn;
-
-        const statusEl = document.getElementById('combat-status');
-        if (!combat.active) {
-            statusEl.textContent = '';
-        } else if (isPlayerTurn) {
-            statusEl.textContent = '👉 Tu turno — elige una acción';
-        } else {
-            const entry = combat.order[combat.turnIndex];
-            statusEl.textContent = entry.kind === 'enemy' ? `${entry.ref.type.emoji} Turno de ${entry.ref.type.name}...` : '';
-        }
-    },
-
-    showVictoryPanel(loot) {
-        document.getElementById('combat-panel').classList.add('hidden');
-
-        const summaryEl = document.getElementById('victory-summary');
-        summaryEl.innerHTML = loot.defeated.map(d => `<span class="victory-chip">${d.emoji} ${d.name}</span>`).join('');
-
-        document.getElementById('victory-xp').textContent = `+${loot.xp} XP` + (loot.gold ? `   +${loot.gold} 🪙` : '');
-
-        const dropsEl = document.getElementById('victory-drops');
-        const materialIds = Object.keys(loot.materials);
-        if (materialIds.length === 0) {
-            dropsEl.innerHTML = '<div class="panel-note">Sin objetos recolectados.</div>';
-        } else {
-            dropsEl.innerHTML = materialIds.map(id => {
-                const m = loot.materials[id];
-                return `
-                    <div class="combat-enemy-card drop-card">
-                        <div class="combat-enemy-emoji">${m.emoji}</div>
-                        <div class="combat-enemy-name">${m.name}</div>
-                        <div class="combat-hp-text">x${m.qty}</div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        document.getElementById('victory-panel').classList.remove('hidden');
-    },
-
-    hideVictoryPanel() {
-        document.getElementById('victory-panel').classList.add('hidden');
     },
 
     // Panel de precisión de Oro: se abre al hacer click en el chip de Oro
@@ -1707,8 +1567,11 @@ const UI = {
         const controlesHTML = `
             <div class="guide-controls-list">
                 <div class="guide-control-row"><b>WASD / Flechas</b><span>Mover</span></div>
-                <div class="guide-control-row"><b>Click / Espacio</b><span>Combate / Recolectar</span></div>
-                <div class="guide-control-row"><b>Click / Espacio</b><span>cerca del Portal 🌀</span></div>
+                <div class="guide-control-row"><b>Click Izquierdo</b><span>Ataque 1</span></div>
+                <div class="guide-control-row"><b>Click Derecho</b><span>Ataque 2</span></div>
+                <div class="guide-control-row"><b>Mantener R</b><span>Ataque 3 (requiere 10 cargas) — soltar para lanzarlo</span></div>
+                <div class="guide-control-row"><b>H</b><span>Usar poción</span></div>
+                <div class="guide-control-row"><b>Espacio</b><span>Recolectar / cerca del Portal 🌀</span></div>
                 <div class="guide-control-row"><b>I</b><span>Inventario</span></div>
                 <div class="guide-control-row"><b>E</b><span>Encantar</span></div>
                 <div class="guide-control-row"><b>M</b><span>Mapa</span></div>
@@ -1717,8 +1580,6 @@ const UI = {
                 <div class="guide-control-row"><b>P</b><span>Pisos</span></div>
                 <div class="guide-control-row"><b>G</b><span>Guía</span></div>
                 <div class="guide-control-row"><b>ESC</b><span>Menú (o cerrar la ventana abierta)</span></div>
-                <div class="guide-control-row"><b>1-3 / Espacio</b><span>Ataques / Pasar turno (en combate)</span></div>
-                <div class="guide-control-row"><b>G</b><span>Poción (en combate)</span></div>
             </div>
         `;
 

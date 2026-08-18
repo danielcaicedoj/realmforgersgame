@@ -50,11 +50,35 @@ const SPAWN_ZONE_PLAYER_COLOR = '#d63cff';
 // Nodos que no reaparecen: hay que vencer varios enemigos cerca para
 // desbloquearlos, y después se abren con una carga corta (como recolectar).
 const CHESTS_PER_FLOOR = 5;
-const CHEST_REQUIRED_KILLS = 5;
-const CHEST_KILL_RADIUS = 320; // "cerca" del cofre, para contar la muerte de un enemigo
-const CHEST_GUARD_INITIAL = 2; // enemigos que aparecen apenas se genera el cofre
+const CHEST_ZONE_RADIUS = 250; // "cerca" del cofre: enemigos guardianes + conteo de progreso
 const CHEST_INTERACT_RANGE = 90;
 const CHEST_OPEN_TIME = 1000; // 1 segundo, igual que recolectar por ahora (GATHER_TIME)
+
+// Población de guardianes por cofre, escalada por rango de piso (más pisos
+// avanzados = cofre mejor custodiado). Se sortea un objetivo puntual dentro
+// del rango [min,max] una sola vez, al crear el cofre.
+const CHEST_GUARD_TARGET_BRACKETS = [
+    { maxFloor: 50, min: 8, max: 12 },
+    { maxFloor: 100, min: 12, max: 16 },
+    { maxFloor: 200, min: 15, max: 20 },
+    { maxFloor: 300, min: 18, max: 25 },
+    { maxFloor: 400, min: 22, max: 30 },
+    { maxFloor: 500, min: 25, max: 35 },
+    { maxFloor: 600, min: 30, max: 40 },
+    { maxFloor: 700, min: 35, max: 45 },
+    { maxFloor: 800, min: 40, max: 50 },
+    { maxFloor: 900, min: 45, max: 55 },
+    { maxFloor: 1000, min: 50, max: 60 },
+];
+function rollChestGuardTarget(floor) {
+    const bracket = CHEST_GUARD_TARGET_BRACKETS.find(b => floor <= b.maxFloor) || CHEST_GUARD_TARGET_BRACKETS[CHEST_GUARD_TARGET_BRACKETS.length - 1];
+    return bracket.min + Math.floor(Math.random() * (bracket.max - bracket.min + 1));
+}
+// Reemplazo de guardianes: si mueren atraídos LEJOS del cofre (no cuentan
+// para el progreso), reaparecen rápido; si mueren DENTRO de la zona (sí
+// cuentan) y aún falta población, reaparecen más lento.
+const CHEST_GUARD_REPLACE_DELAY_OUTSIDE_MS = [2000, 3000];
+const CHEST_GUARD_REPLACE_DELAY_INSIDE_MS = [5000, 10000];
 
 // Genera el contenido de un cofre: núcleos de su propia rareza, 1-2 recursos
 // variados (del tier del piso) y, desde Poco Común, alguna poción. A mayor
@@ -143,13 +167,10 @@ function getEnemyXPReward(floor, rarityId, bossKind) {
 }
 
 // ----- MULTIPLICADOR POR TAMAÑO DE GRUPO (compartido: loot y oro) -----
-// El "grupo" es la cantidad de enemigos que entraron juntos al mismo
-// combate por turnos (Combat.enemies.length, ver ENGAGE_GROUP_RADIUS en
-// game.js) — el motor ya agrupa por proximidad al enganchar combate, así
-// que reutiliza esa noción en vez de recalcular proximidad de nuevo. 1-2
-// enemigos no reciben bono; el bono queda fijo en el tamaño del grupo con
-// el que se inició ESE combate (no se recalcula si algún enemigo muere a
-// mitad de combate).
+// El "grupo" es la cantidad de enemigos vivos cerca del que se derrota en
+// ESE instante (ver RT_ENGAGE_GROUP_RADIUS más abajo), recalculado en cada
+// muerte ya que en combate en tiempo real no existe un "combate" con
+// composición fija. 1-2 enemigos no reciben bono.
 const GROUP_LOOT_MULT = { 3: 1.6, 4: 1.6, 5: 1.7, 6: 1.8, 7: 1.9, 8: 2.0 };
 function getGroupMultiplier(groupSize) {
     if (groupSize >= 8) return 2.0;
@@ -610,6 +631,12 @@ function getHerbTierForFloor(floor) {
     return HERB_TIERS.find(t => floor >= t.min && floor <= t.max) || HERB_TIERS[0];
 }
 
+// Alimentos del Campesino: `version.duration` (foods.js) era "N combates"
+// en el viejo sistema por turnos; en tiempo real se traduce a minutos
+// reales (ver Player.useFood/tick). 1.5 min ≈ la duración típica de un
+// combate anterior.
+const FOOD_BUFF_MINUTES_PER_UNIT = 1.5;
+
 // Pociones de curación: crafteadas con hierba + núcleo (ver player.craftPotion).
 // La rareza del núcleo determina cuánto curan; el costo de hierba es fijo,
 // no depende del tier (ver POTION_HERB_COST).
@@ -653,15 +680,98 @@ function getEnemyPoolForFloor(floor) {
     return (bracket || FLOOR_ENEMY_POOLS[0]).ids.map(getEnemyType);
 }
 
-// ----- COMBATE POR TURNOS -----
-const ENGAGE_RANGE = 110;      // distancia máxima para hacer click o Espacio e iniciar combate
-const ENGAGE_GROUP_RADIUS = 90; // enemigos cercanos al objetivo que se suman al combate
-const FLEE_SUCCESS_CHANCE = 0.6;
-const INITIATIVE_DIE = 20;
+// ----- COMBATE EN TIEMPO REAL -----
+// Reemplaza el viejo combate por turnos (iniciativa/PA/carga máx 3): ahora
+// cada ataque tiene su propio cooldown en ms y una carga UNIVERSAL (0-10,
+// otorgada por Ataque1 al impactar) gatea el Ataque 3. La carga SECUNDARIA
+// de clase (PODER/SED DE SANGRE/ENFOQUE/AMPLIFICACIÓN/RESISTENCIA, máx 3,
+// ver Combat.classCharge) se mantiene sin cambios — solo cambia el
+// disparador (Ataque1/2 en tiempo real en vez de en el turno).
+const RT_CHARGE_MAX = 10;
+const RT_CLASS_CHARGE_MAX = 3;
+const RT_ENGAGE_GROUP_RADIUS = 90; // enemigos cercanos al que muere, para el multiplicador de loot por grupo
 
-function rollD20() {
-    return 1 + Math.floor(Math.random() * INITIATIVE_DIE);
+// Cooldown escalable con el nivel del arma/jugador: mismo valor base para
+// todas las clases (Ataque1=1s, Ataque2=2s, Ataque3 solo requiere cargas,
+// sin cooldown de tiempo), reducido progresivamente entre nivel 1 (factor
+// 1.0) y nivel MAX_LEVEL (factor 0.1, i.e. -90%).
+//   ProgresionGlobal = (nivel - 1) / (MAX_LEVEL - 1)      -> 0 en nivel 1, 1 en nivel MAX_LEVEL
+//   CooldownFinal = Base × [0.1 + 0.9 × (1 - ProgresionGlobal)]
+const RT_ATTACK_BASE_COOLDOWN_MS = [1000, 2000, 0];
+function getAttackCooldownMs(profId, slot, level) {
+    const base = RT_ATTACK_BASE_COOLDOWN_MS[slot];
+    if (!base) return 0; // Ataque 3: sin cooldown base
+    const lvl = Math.min(Math.max(level || 1, 1), MAX_LEVEL);
+    const progresionGlobal = (lvl - 1) / (MAX_LEVEL - 1);
+    const factor = 0.1 + 0.9 * (1 - progresionGlobal);
+    return base * factor;
 }
+
+// Geometría/visual por profesión y slot. Cada entrada separa la FORMA DE
+// IMPACTO (hitShape: qué enemigos son alcanzados) del ESTILO VISUAL
+// (visual: cómo se dibuja), para poder rediseñar el look de cada clase sin
+// tocar la detección de golpes:
+//   hitShape 'cone'         -> getEnemiesInCone(range, angle) centrado en el jugador
+//   hitShape 'circle'       -> getEnemiesInCircle(range) centrado en el jugador
+//   hitShape 'offsetCircle' -> getEnemiesInCircle(range) centrado a offsetRange
+//                               px por delante del jugador en la dirección de aim
+//   visual 'cone'    -> relleno translúcido tipo cono (look original, solo Mago)
+//   visual 'slash'   -> arco/línea tipo "corte" (cuerpo a cuerpo rediseñado)
+//   visual 'arrow'   -> flecha recta (Arquero A1/A3)
+//   visual 'arrowRain' -> lluvia de flechas cayendo sobre un área (Arquero A2)
+//   visual 'circle'  -> círculo expandible centrado en el jugador (Ataque 3)
+// `startRange`/`duration` parametrizan la expansión del círculo especial;
+// Mago conserva sus valores viejos (startRange:160, duration:400) para no
+// alterar su visual, que la especificación pide dejar sin cambios.
+// El nombre real de cada tier (weapon-attacks.js) se sigue usando en el
+// texto flotante/log.
+const RT_ATTACK_GEOMETRY = {
+    picaro: [ // 🗡️ slash blanco, rápido y preciso
+        { hitShape: 'cone', visual: 'slash', range: 150, angle: 45, duration: 120, particleCount: 4, color: '#ffffff', particleColor: '#f2f2f2' },
+        { hitShape: 'cone', visual: 'slash', range: 200, angle: 60, duration: 200, particleCount: 8, color: '#ffffff', particleColor: '#f2f2f2' },
+        { hitShape: 'circle', visual: 'circle', range: 300, startRange: 50, duration: 500, particleCount: 20, color: '#ffffff', particleColor: '#f2f2f2' },
+    ],
+    guerrero: [ // ⚔️ slash verde
+        { hitShape: 'cone', visual: 'slash', range: 180, angle: 55, duration: 150, particleCount: 5, color: '#3ecf5e', particleColor: '#7bffa0' },
+        { hitShape: 'cone', visual: 'slash', range: 250, angle: 100, duration: 220, particleCount: 14, color: '#3ecf5e', particleColor: '#7bffa0' },
+        { hitShape: 'circle', visual: 'circle', range: 400, startRange: 60, duration: 600, particleCount: 24, color: '#3ecf5e', particleColor: '#a0ffc0' },
+    ],
+    barbaro: [ // 🪓 slash rojo, sangriento
+        { hitShape: 'cone', visual: 'slash', range: 160, angle: 50, duration: 180, particleCount: 8, color: '#ff4d4d', particleColor: '#ff8080' },
+        { hitShape: 'cone', visual: 'slash', range: 230, angle: 110, duration: 320, particleCount: 16, color: '#8b1a1a', particleColor: '#c0392b' },
+        { hitShape: 'circle', visual: 'circle', range: 350, startRange: 70, duration: 550, particleCount: 26, color: '#c0392b', particleColor: '#ff4d4d' },
+    ],
+    tanque: [ // 🔨 slash gris/azul, defensivo
+        { hitShape: 'cone', visual: 'slash', range: 170, angle: 60, duration: 180, particleCount: 8, color: '#9fb4c7', particleColor: '#d0dce6' },
+        { hitShape: 'cone', visual: 'slash', range: 240, angle: 130, duration: 250, particleCount: 10, color: '#4a90d9', particleColor: '#8ec0ff' },
+        { hitShape: 'circle', visual: 'circle', range: 380, startRange: 80, duration: 500, particleCount: 22, color: '#4a90d9', particleColor: '#8ec0ff' },
+    ],
+    mago: [ // 🧙 SIN CAMBIOS: proyectiles mágicos, look original preservado
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 30, duration: 220, particleCount: 8, color: '#b366ff', particleColor: '#d9b3ff' },
+        { hitShape: 'cone', visual: 'cone', range: 300, angle: 40, duration: 260, particleCount: 12, color: '#3399ff', particleColor: '#99ccff' },
+        { hitShape: 'circle', visual: 'circle', range: 400, startRange: 160, duration: 400, particleCount: 24, color: '#cc66ff', particleColor: '#e6b3ff' },
+    ],
+    arquero: [ // 🏹 flechas doradas, angostas y precisas
+        { hitShape: 'cone', visual: 'arrow', range: 350, angle: 30, duration: 100, particleCount: 4, color: '#ffd700', particleColor: '#ffe680' },
+        { hitShape: 'offsetCircle', visual: 'arrowRain', range: 250, offsetRange: 400, duration: 250, particleCount: 12, color: '#ffd700', particleColor: '#ffe680' },
+        { hitShape: 'cone', visual: 'arrow', range: 350, angle: 13, duration: 450, particleCount: 14, color: '#ffcc00', particleColor: '#fff2b3', fragments: true },
+    ],
+    desarmado: [ // sin especificación propia: se mantiene el look de cono original
+        { hitShape: 'cone', visual: 'cone', range: 120, angle: 60, duration: 200, particleCount: 6, color: '#ffffff', particleColor: '#dddddd' },
+        { hitShape: 'cone', visual: 'cone', range: 150, angle: 70, duration: 220, particleCount: 8, color: '#ffffff', particleColor: '#dddddd' },
+        { hitShape: 'circle', visual: 'circle', range: 250, startRange: 60, duration: 400, particleCount: 16, color: '#ffffff', particleColor: '#dddddd' },
+    ],
+};
+function getAttackGeometry(profId, slot) {
+    const table = RT_ATTACK_GEOMETRY[profId] || RT_ATTACK_GEOMETRY.desarmado;
+    return table[slot];
+}
+
+// ----- IA DE ENEMIGOS (persiguen y atacan en tiempo real) -----
+const ENEMY_VISUAL_RANGE = 800;  // detectan al jugador y empiezan a perseguir
+const ENEMY_LEASH_RANGE = 1300;  // dejan de perseguir si el jugador se aleja más que esto
+const ENEMY_ATTACK_RANGE = 150;  // se detienen y atacan
+const ENEMY_ATTACK_DELAY_MS = [1500, 2000]; // rango de delay entre ataques propios
 
 // ----- RECURSOS (nodos de recolección) -----
 const RESOURCE_TYPES = {

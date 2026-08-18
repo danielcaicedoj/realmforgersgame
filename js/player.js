@@ -62,29 +62,33 @@ class Player {
         this.mounts = []; // [{id, tierId, rarityId, speedPercent, createdAt}]
         this.equippedMountId = null;
 
-        // Buffs de alimentos del campesino (ver foods.js): los de duración
-        // en combates se listan en foodBuffs y se decrementan al terminar
-        // cada combate (ver tickFoodBuffsOnCombatEnd); los de regeneración
-        // en tiempo real viven en regenBuffs y expiran solos (ver tick()).
-        this.foodBuffs = []; // [{foodId, name, emoji, stat, amount, combatsLeft, turnRegen}]
+        // Buffs de alimentos del campesino (ver foods.js): antes duraban N
+        // combates (turno a turno); en combate en tiempo real no hay un
+        // límite de encuentro fijo, así que ahora expiran por tiempo real
+        // (expiresAt), igual que regenBuffs — ver tick().
+        this.foodBuffs = []; // [{foodId, name, emoji, stat, amount, expiresAt, turnRegen}]
         this.regenBuffs = []; // [{foodId, name, emoji, hpPerMin, expiresAt}]
 
-        // Efectos de estado que le pueden aplicar los jefes en combate.
-        this.burn = null;   // { dmg, turnsLeft }
-        this.frozenNextTurn = false; // el próximo turno empieza con la mitad de PA
+        // Efectos de estado que le pueden aplicar los enemigos en combate
+        // (ver Combat.performEnemyAttackRT): quemadura con tick real-time
+        // (1/seg, ver tick()) y penalización de XP con vencimiento propio.
+        this.burn = null;   // { dmg, expiresAt, lastTickAt }
+        this.xpPenalty = 1;
+        this.xpPenaltyUntil = 0;
 
         // Escudo del Tanque (Golpe de Escudo / especiales por tier, ver
         // weapon-attacks.js y combat.js): absorbe daño entrante antes de
-        // tocar la vida real. amount = HP restantes por absorber, turnsLeft
-        // = turnos hasta que expire (aunque no lo hayan roto). Los campos
+        // tocar la vida real. amount = HP restantes por absorber, expiresAt
+        // = cuándo vence (aunque no lo hayan roto antes). Los campos
         // opcionales (armorBonusPercent, enemyDmgReducePercent,
         // reflectPercent, burnAttacker, healPercentPerTurn,
         // blockBonusPercent, dodgeBonusChance) vienen de los especiales
         // únicos de cada Tier (Ataque 3). Nunca se persiste (combate-only,
-        // como burn/frozenNextTurn).
+        // como burn).
         this.shield = null;
 
         this.levelUpFlashes = []; // {professionId, until}
+        this._foodTurnRegenTickAt = 0; // ver getFoodTurnRegen/tick(): antes curaba 1 vez por turno, ahora 1 vez/seg
 
         this.loadFromSave();
     }
@@ -177,6 +181,8 @@ class Player {
 
     // Ticks pasivos (regeneración). Se pausa mientras haya un panel/combate abierto.
     tick(dt) {
+        const now = Date.now();
+
         if (this.arrows < this.maxArrows) {
             this.arrowRegenTimer += dt;
             if (this.arrowRegenTimer > 1800) {
@@ -186,14 +192,13 @@ class Player {
         }
 
         // Regeneración de vida: 1 HP/seg por nivel (a nivel 600, 600 HP/seg).
-        if (this.hp > 0 && this.hp < this.maxHp && Date.now() - this.lastDamageTime > 4000) {
+        if (this.hp > 0 && this.hp < this.maxHp && now - this.lastDamageTime > 4000) {
             this.heal((dt / 1000) * this.level);
         }
 
         // Regeneración extra de alimentos (real-time, independiente del gate
         // de 4s sin recibir daño): se suma mientras el buff no haya expirado.
         if (this.regenBuffs.length) {
-            const now = Date.now();
             this.regenBuffs = this.regenBuffs.filter(b => b.expiresAt > now);
             const extraHpPerMin = this.regenBuffs.reduce((s, b) => s + b.hpPerMin, 0);
             if (extraHpPerMin > 0 && this.hp > 0 && this.hp < this.maxHp) {
@@ -201,7 +206,46 @@ class Player {
             }
         }
 
-        this.levelUpFlashes = this.levelUpFlashes.filter(f => f.until > Date.now());
+        // Quemadura propia (ver Combat.performEnemyAttackRT): 1 tick/seg.
+        if (this.burn) {
+            if (now >= this.burn.expiresAt) {
+                this.burn = null;
+            } else if (now - this.burn.lastTickAt >= 1000) {
+                this.burn.lastTickAt += 1000;
+                this.takeDamage(this.burn.dmg);
+            }
+        }
+
+        // Escudo del Tanque: vencimiento por tiempo real (antes por turnos)
+        // + curación pasiva mientras esté activo (Bulwark Estelar+, 1 tick/seg).
+        if (this.shield) {
+            if (now >= this.shield.expiresAt) {
+                this.shield = null;
+            } else if (this.shield.healPercentPerTurn) {
+                if (!this.shield.lastHealTickAt) this.shield.lastHealTickAt = now;
+                if (now - this.shield.lastHealTickAt >= 1000) {
+                    this.shield.lastHealTickAt += 1000;
+                    this.heal(Math.round(this.maxHp * this.shield.healPercentPerTurn));
+                }
+            }
+        }
+
+        // Buffs de alimentos (antes "N combates", ahora vencen por tiempo real).
+        if (this.foodBuffs.length) {
+            const hadVidaBuff = this.foodBuffs.some(b => b.expiresAt <= now && b.stat === 'vida');
+            this.foodBuffs = this.foodBuffs.filter(b => b.expiresAt > now);
+            if (hadVidaBuff) this.recalcMaxHp();
+
+            // Regeneración "por turno" de ciertos alimentos: antes curaba al
+            // empezar el turno del jugador, ahora 1 vez por segundo real.
+            const turnRegenTotal = this.getFoodTurnRegen();
+            if (turnRegenTotal > 0 && this.hp > 0 && now - this._foodTurnRegenTickAt >= 1000) {
+                this._foodTurnRegenTickAt = now;
+                this.heal(turnRegenTotal);
+            }
+        }
+
+        this.levelUpFlashes = this.levelUpFlashes.filter(f => f.until > now);
     }
 
     getActiveProfessionDef() {
@@ -540,10 +584,12 @@ class Player {
 
     // Consume 1 alimento de esa versión y aplica su buff. Los de "vida"
     // suben el máximo de HP (y curan esa cantidad) mientras estén activos;
-    // los de "regen_time" son un buff de regeneración fuera de combate en
-    // tiempo real; el resto (defensa/fuerza/destreza/inteligencia/pa) se
-    // acumulan en foodBuffs y se descuentan combate a combate (ver
-    // tickFoodBuffsOnCombatEnd, llamado desde Combat.finish).
+    // los de "regen_time" son un buff de regeneración en tiempo real; el
+    // resto (defensa/fuerza/destreza/inteligencia/pa) se acumulan en
+    // foodBuffs. `version.duration` era "N combates" en el viejo sistema
+    // por turnos; ahora que no hay un límite de encuentro fijo se traduce a
+    // minutos reales (ver FOOD_BUFF_MINUTES_PER_UNIT), y expiran solos en
+    // tick() como cualquier otro buff temporal.
     useFood(foodId, rarityId) {
         const key = `food_${foodId}__${rarityId}`;
         if ((this.materials[key] || 0) <= 0) return null;
@@ -561,7 +607,7 @@ class Player {
         } else {
             this.foodBuffs.push({
                 foodId, name: def.food.name, emoji: def.food.emoji, stat: def.food.stat,
-                amount: version.amount, combatsLeft: version.duration, turnRegen: version.regen || 0,
+                amount: version.amount, expiresAt: Date.now() + version.duration * FOOD_BUFF_MINUTES_PER_UNIT * 60000, turnRegen: version.regen || 0,
             });
             if (def.food.stat === 'vida') {
                 this.recalcMaxHp(); // sube maxHp con el nuevo buff antes de curar, para no perder el HP extra
@@ -569,20 +615,6 @@ class Player {
             }
         }
         return { name: def.food.name, emoji: def.food.emoji, rarity: getMonsterRarity(rarityId) };
-    }
-
-    // Se llama una vez por combate resuelto (ver Combat.finish). Descuenta
-    // 1 combate a cada buff activo; al llegar a 0, se retira (revirtiendo
-    // el maxHp extra si era un buff de "vida").
-    tickFoodBuffsOnCombatEnd() {
-        let hadVidaBuff = false;
-        this.foodBuffs = this.foodBuffs.filter(b => {
-            b.combatsLeft--;
-            if (b.combatsLeft > 0) return true;
-            if (b.stat === 'vida') hadVidaBuff = true;
-            return false;
-        });
-        if (hadVidaBuff) this.recalcMaxHp();
     }
 
     getDamage() {

@@ -60,7 +60,9 @@
         resizeCanvas();
         UI.init();
         player = new Player();
+        Combat.init(player);
         Combat.onKillHook = handleEnemyKilled;
+        Combat.spawnFloatingText = addFloatingText;
         UI.onUseTeleportScroll = requestTeleport;
         UI.onUseAlteracionScroll = useAlteracionScroll;
         UI.onTeleportToFloor = teleportToFloor;
@@ -330,7 +332,9 @@
 
         finalBossAlive = false;
 
-        // Cofres: no reaparecen, hay que vencer enemigos cerca para abrirlos.
+        // Cofres: no reaparecen, hay que vencer guardianes dentro de su zona
+        // para abrirlos. La población de guardianes escala con el piso (ver
+        // rollChestGuardTarget en constants.js) y se repone si mueren.
         chests = [];
         opening = null;
         const chestRooms = shuffleArray(dungeon.rooms.slice());
@@ -338,9 +342,10 @@
             const room = chestRooms[i];
             if (!room) break;
             const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
-            const chest = new Chest(pos.x, pos.y, rollMonsterRarity());
+            const guardTarget = rollChestGuardTarget(floorNum);
+            const chest = new Chest(pos.x, pos.y, rollMonsterRarity(), guardTarget);
             chests.push(chest);
-            for (let g = 0; g < CHEST_GUARD_INITIAL; g++) spawnChestGuard(chest);
+            for (let g = 0; g < guardTarget; g++) spawnChestGuard(chest);
         }
 
         // Portales (ver generarPortales en grid-dungeon.js): 4 fijos en las
@@ -526,6 +531,9 @@
     }
 
     // ----- COFRES -----
+    // `chestGuardId` tagea al enemigo como guardián DE ESE cofre (referencia
+    // directa al objeto Chest), para poder contar su población viva y
+    // reponerlo específicamente a él cuando muere.
     function spawnChestGuard(chest) {
         const pool = getEnemyPoolForFloor(player.floor);
         const base = pool[Math.floor(Math.random() * pool.length)];
@@ -533,21 +541,58 @@
         applyMonsterRarity(type);
         let pos = { x: chest.x + (Math.random() - 0.5) * 140, y: chest.y + (Math.random() - 0.5) * 140 };
         if (!dungeon.isWalkable(pos.x, pos.y, type.radius)) pos = { x: chest.x, y: chest.y };
-        enemies.push(new Enemy(type, pos.x, pos.y));
+        const guard = new Enemy(type, pos.x, pos.y);
+        guard.chestGuardId = chest;
+        enemies.push(guard);
+        return guard;
     }
 
-    // Si el enemigo eliminado estaba cerca de un cofre todavía bloqueado,
-    // cuenta para su desbloqueo y le manda un guardia de reemplazo rápido
-    // (hasta llegar al requisito; después deja de reponer).
+    function countAliveChestGuards(chest) {
+        return enemies.filter(e => e.alive && e.chestGuardId === chest).length;
+    }
+
+    function scheduleChestGuardReplacement(chest, delayRangeMs) {
+        if (chest.unlocked || chest.opened) return;
+        const [minD, maxD] = delayRangeMs;
+        chest.pendingSpawns.push(Date.now() + minD + Math.random() * (maxD - minD));
+    }
+
+    // Procesa reposiciones de guardianes pendientes (ver
+    // scheduleChestGuardReplacement): se llama cada frame desde update().
+    function processChestPendingSpawns() {
+        const now = Date.now();
+        chests.forEach(chest => {
+            if (!chest.pendingSpawns.length) return;
+            if (chest.unlocked || chest.opened) { chest.pendingSpawns = []; return; }
+            const stillPending = [];
+            chest.pendingSpawns.forEach(t => {
+                if (now < t) { stillPending.push(t); return; }
+                if (countAliveChestGuards(chest) < chest.guardTarget) spawnChestGuard(chest);
+            });
+            chest.pendingSpawns = stillPending;
+        });
+    }
+
+    // Solo las muertes DENTRO de la zona (CHEST_ZONE_RADIUS) cuentan para el
+    // progreso de desbloqueo. Si el enemigo eliminado era guardián de este
+    // cofre, se repone: rápido si murió atraído fuera de la zona (no cuenta),
+    // más lento si murió dentro y la población todavía está por debajo del
+    // objetivo.
     function registerChestKill(target) {
         chests.forEach(chest => {
             if (chest.unlocked || chest.opened) return;
-            if (Math.hypot(target.x - chest.x, target.y - chest.y) > CHEST_KILL_RADIUS) return;
-            chest.registerNearbyKill();
-            if (chest.unlocked) {
-                addFloatingText(chest.x, chest.y - chest.radius - 16, '🔓 ¡Cofre desbloqueado!', '#ffd27a');
-            } else {
-                spawnChestGuard(chest);
+            const distToChest = Math.hypot(target.x - chest.x, target.y - chest.y);
+            const isOwnGuard = target.chestGuardId === chest;
+            if (distToChest <= CHEST_ZONE_RADIUS) {
+                chest.registerZoneKill();
+                if (chest.unlocked) {
+                    addFloatingText(chest.x, chest.y - chest.radius - 16, '🔓 ¡Cofre desbloqueado!', '#ffd27a');
+                    chest.pendingSpawns = [];
+                    return;
+                }
+                if (isOwnGuard) scheduleChestGuardReplacement(chest, CHEST_GUARD_REPLACE_DELAY_INSIDE_MS);
+            } else if (isOwnGuard) {
+                scheduleChestGuardReplacement(chest, CHEST_GUARD_REPLACE_DELAY_OUTSIDE_MS);
             }
         });
     }
@@ -565,7 +610,7 @@
     function startOpenChest(chest) {
         if (dead || Combat.active || isAnyPanelOpen() || chest.opened) return;
         if (!chest.unlocked) {
-            addFloatingText(chest.x, chest.y - chest.radius - 16, `Cofre bloqueado: ${chest.kills}/${chest.requiredKills}`, '#ff8585');
+            addFloatingText(chest.x, chest.y - chest.radius - 16, `Cofre bloqueado: ${chest.zoneKills}/${chest.guardTarget}`, '#ff8585');
             return;
         }
         if (opening && opening.chest === chest) return; // ya en progreso
@@ -600,29 +645,6 @@
         }
         const max = tool ? getGatherYieldMax(tool.rarityId) : GATHER_YIELD_MAX_BASE;
         return { min: GATHER_YIELD_MIN, max };
-    }
-
-    // Rellena el piso con nuevos enemigos (hasta el cap) tras un combate.
-    // Si el grupo derrotado era un enemigo solitario, el reemplazo aparece
-    // acompañado (2-3 enemigos, posiblemente de otra especie/rareza).
-    function spawnReplacementEnemies(count) {
-        const aliveCount = enemies.filter(e => e.alive).length;
-        const spawnCount = Math.min(count, Math.max(0, ENEMIES_PER_FLOOR - aliveCount));
-        if (spawnCount <= 0) return;
-
-        if (!dungeon.rooms.length) return;
-        const room = dungeon.rooms[Math.floor(Math.random() * dungeon.rooms.length)];
-        const anchor = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
-        const pool = getEnemyPoolForFloor(player.floor);
-
-        for (let i = 0; i < spawnCount; i++) {
-            const base = pool[Math.floor(Math.random() * pool.length)];
-            const type = buildScaledEnemyType(base, player.floor);
-            applyMonsterRarity(type);
-            let pos = { x: anchor.x + (Math.random() - 0.5) * 70, y: anchor.y + (Math.random() - 0.5) * 70 };
-            if (!dungeon.isWalkable(pos.x, pos.y, type.radius)) pos = anchor;
-            enemies.push(new Enemy(type, pos.x, pos.y));
-        }
     }
 
     // ----- ZONAS DE SPAWN INCREMENTADO -----
@@ -893,7 +915,7 @@
     }
 
     function isAnyPanelOpen() {
-        return ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel', 'combat-panel', 'victory-panel', 'gold-panel', 'shop-panel', 'menu-panel', 'boss-teleport-panel']
+        return ['inventory-panel', 'enchant-panel', 'map-panel', 'craft-panel', 'stats-panel', 'guide-panel', 'floors-panel', 'gold-panel', 'shop-panel', 'menu-panel', 'boss-teleport-panel']
             .some(id => !document.getElementById(id).classList.contains('hidden'));
     }
 
@@ -944,6 +966,15 @@
             handleWorldClick(x, y);
         }, { passive: true });
 
+        // Click derecho: Ataque 2 (ver handleRightClick). preventDefault
+        // evita que el navegador abra su menú contextual.
+        canvas.addEventListener('contextmenu', e => {
+            e.preventDefault();
+            const canvasPos = getCanvasCoords(e.clientX, e.clientY);
+            const { x, y } = toWorldCoords(canvasPos.x, canvasPos.y);
+            handleRightClick(x, y);
+        });
+
         // Notificación del Jefe Final (ver #final-boss-notification en
         // index.html): visible mientras haya un Jefe Final activo en
         // cualquier piso, pero no clickeable en la Taberna (sigue visible
@@ -983,27 +1014,12 @@
         window.addEventListener('keydown', e => {
             const key = e.key.toLowerCase();
 
-            // Ventana de Victoria: Espacio equivale a click en "Continuar".
-            // e.repeat descarta el auto-repeat del SO al mantener apretada
-            // la tecla; el propio ocultamiento del panel (ver
-            // UI.triggerVictoryContinue) evita activaciones múltiples.
-            if (key === ' ' && UI.isVictoryPanelVisible()) {
+            // Ataque 3 (especial): mantener R carga si ya hay 10 cargas
+            // (ver Combat.startCharge); e.repeat evita reiniciar la carga
+            // en cada tick de auto-repeat del SO mientras se mantiene.
+            if (key === 'r' && !dead) {
                 e.preventDefault();
-                if (!e.repeat) UI.triggerVictoryContinue();
-                return;
-            }
-
-            if (Combat.active) {
-                if (key === '1' || key === '2' || key === '3') {
-                    e.preventDefault();
-                    Combat.playerAttack(parseInt(key, 10) - 1);
-                } else if (key === 'g') {
-                    e.preventDefault();
-                    useFirstAvailablePotionInCombat();
-                } else if (key === ' ') {
-                    e.preventDefault();
-                    Combat.playerEndTurn();
-                }
+                if (!e.repeat) Combat.startCharge();
                 return;
             }
 
@@ -1018,8 +1034,6 @@
                 if (dead || isAnyPanelOpen()) return;
                 const portal = findNearestPortalInRange();
                 if (portal) { activatePortal(portal); return; }
-                const enemy = findNearestEnemyInRange();
-                if (enemy) { engageEnemy(enemy); return; }
                 const chest = findNearestChest();
                 if (chest) { startOpenChest(chest); return; }
                 const node = findNearestGatherNode();
@@ -1034,7 +1048,7 @@
                 const anyOpen = closablePanels.some(id => !document.getElementById(id).classList.contains('hidden'));
                 if (anyOpen) {
                     closablePanels.forEach(id => UI.hidePanel(id));
-                } else if (!dead && !UI.isVictoryPanelVisible()) {
+                } else if (!dead) {
                     // Nada abierto: ESC abre el Menú (ver menu-panel en index.html).
                     UI.showMenuPanel();
                 }
@@ -1048,20 +1062,22 @@
             else if (key === 'v') { UI.renderStats(player); UI.togglePanel('stats-panel'); }
             else if (key === 'p') { UI.renderFloors(player, inTaberna, floorBeforeTaberna); UI.togglePanel('floors-panel'); }
             else if (key === 'g') { UI.renderGuide(); UI.togglePanel('guide-panel'); }
+            else if (key === 'h') { useFirstAvailablePotion(); }
             else if (key === 'r') { if (dead) respawn(); }
         });
 
         window.addEventListener('keyup', e => {
+            if (e.key.toLowerCase() === 'r') Combat.releaseCharge();
             keys.delete(e.key.toLowerCase());
         });
     }
 
-    // Tecla G en combate: usa la primera poción disponible (rareza más común
-    // primero, para conservar las mejores) respetando los límites de Combat.
-    function useFirstAvailablePotionInCombat() {
+    // Tecla H: usa la primera poción disponible (rareza más común primero,
+    // para conservar las mejores), con el cooldown de Combat.usePotionRT.
+    function useFirstAvailablePotion() {
         for (const rarity of MONSTER_RARITIES) {
             if ((player.materials[`pocion_${rarity.id}`] || 0) > 0) {
-                Combat.usePotionInCombat(rarity.id);
+                Combat.usePotionRT(rarity.id);
                 return;
             }
         }
@@ -1083,33 +1099,15 @@
         floatingTexts.push({ x, y, text, color, life: maxLife, maxLife, vy: -0.7 });
     }
 
-    function onCombatResolved(result) {
-        keys.clear();
-        UI.hideCombatPanel();
-        if (result === 'victory') {
-            // Un grupo de un solo enemigo (peleado en solitario) se reemplaza
-            // por 2-3 nuevos, para que el piso tienda a formar más grupos.
-            const wasSolitary = Combat.enemies.length === 1;
-            enemies = enemies.filter(en => en.alive);
-            spawnReplacementEnemies(wasSolitary ? 2 + Math.floor(Math.random() * 2) : 1);
-        } else if (result === 'defeat') {
-            dead = true;
-            UI.showGameOver(true);
-            player.save();
-        }
+    // Muerte del jugador: en combate por turnos se detectaba al resolver un
+    // combate; en tiempo real se chequea cada frame (ver update()), ya que
+    // el HP puede llegar a 0 en cualquier momento mientras un enemigo ataca.
+    function checkPlayerDeath() {
+        if (dead || player.hp > 0) return;
+        dead = true;
+        UI.showGameOver(true);
+        player.save();
         UI.updateHUD(player);
-        UI.updateFloorHUD(player.floor, enemies.filter(e => e.alive).length, finalBossAlive);
-    }
-
-    // Enemigo vivo más cercano al jugador dentro del rango de combate.
-    function findNearestEnemyInRange() {
-        let best = null, bestDist = Infinity;
-        enemies.forEach(en => {
-            if (!en.alive) return;
-            const d = Math.hypot(en.x - player.x, en.y - player.y);
-            if (d <= ENGAGE_RANGE && d < bestDist) { bestDist = d; best = en; }
-        });
-        return best;
     }
 
     // Nodo de recurso no agotado más cercano al jugador dentro del rango de recolección.
@@ -1121,15 +1119,6 @@
             if (d <= GATHER_RANGE && d < bestDist) { bestDist = d; best = n; }
         });
         return best;
-    }
-
-    function engageEnemy(target) {
-        if (dead || Combat.active || isAnyPanelOpen()) return;
-        gathering = null;
-        const group = enemies.filter(en => en.alive &&
-            Math.hypot(en.x - target.x, en.y - target.y) <= ENGAGE_GROUP_RADIUS);
-        keys.clear();
-        Combat.start(player, group, onCombatResolved);
     }
 
     function startGather(node) {
@@ -1165,77 +1154,81 @@
     const MERCHANT_CLICK_RADIUS = 44;
 
     function handleWorldClick(x, y) {
-        if (dead || Combat.active || isAnyPanelOpen()) return;
+        if (dead || isAnyPanelOpen()) return;
 
-        // -1) Taberna: ¿se hizo click sobre el Mercader? -> abre la ventana
-        // de comercio si está cerca.
-        if (inTaberna && dungeon.mercaderPos) {
-            const mp = dungeon.mercaderPos;
-            if (Math.hypot(mp.x - x, mp.y - y) <= MERCHANT_CLICK_RADIUS) {
-                if (Math.hypot(mp.x - player.x, mp.y - player.y) > MERCHANT_INTERACT_RANGE) {
-                    addFloatingText(mp.x, mp.y - 50, 'Muy lejos', '#ffd27a');
+        // Mientras haya un enemigo activo cerca (ver Combat.active) no se
+        // puede interactuar con cofres/nodos/portales/mercader — pero el
+        // Ataque 1 (más abajo, fuera de este bloque) SIGUE disponible: de
+        // hecho es la acción principal mientras se está en combate. Antes
+        // este mismo chequeo bloqueaba TODO el handler, incluido el propio
+        // ataque, dejando al jugador sin poder golpear apenas un enemigo se
+        // acercaba (bug corregido).
+        if (!Combat.active) {
+            // -1) Taberna: ¿se hizo click sobre el Mercader? -> abre la
+            // ventana de comercio si está cerca.
+            if (inTaberna && dungeon.mercaderPos) {
+                const mp = dungeon.mercaderPos;
+                if (Math.hypot(mp.x - x, mp.y - y) <= MERCHANT_CLICK_RADIUS) {
+                    if (Math.hypot(mp.x - player.x, mp.y - player.y) > MERCHANT_INTERACT_RANGE) {
+                        addFloatingText(mp.x, mp.y - 50, 'Muy lejos', '#ffd27a');
+                        return;
+                    }
+                    UI.showShopPanel(player);
                     return;
                 }
-                UI.showShopPanel(player);
+            }
+
+            // 0) ¿Se hizo click sobre un portal? -> teletransporta solo si
+            // está cerca (ver PORTAL_HINT_RADIUS); si no, no hace nada.
+            const clickedPortal = portals.find(p => Math.hypot(p.x - x, p.y - y) <= p.radius + 8);
+            if (clickedPortal) {
+                const distToPlayer = Math.hypot(clickedPortal.x - player.x, clickedPortal.y - player.y);
+                if (distToPlayer > PORTAL_HINT_RADIUS) {
+                    addFloatingText(clickedPortal.x, clickedPortal.y - clickedPortal.radius - 10, 'Muy lejos', '#ffd27a');
+                    return;
+                }
+                activatePortal(clickedPortal);
+                return;
+            }
+
+            // 1) ¿Se hizo click sobre un cofre?
+            const clickedChest = chests.find(c => !c.opened && Math.hypot(c.x - x, c.y - y) <= c.radius + 8);
+            if (clickedChest) {
+                const distToPlayer = Math.hypot(clickedChest.x - player.x, clickedChest.y - player.y);
+                if (distToPlayer > CHEST_INTERACT_RANGE) {
+                    addFloatingText(clickedChest.x, clickedChest.y - clickedChest.radius - 10, 'Muy lejos', '#ffd27a');
+                    return;
+                }
+                startOpenChest(clickedChest);
+                return;
+            }
+
+            // 2) ¿Se hizo click sobre un nodo de recurso? Las profesiones de
+            // recolección siempre están disponibles, sin importar el arma equipada.
+            const node = nodes.find(n => !n.depleted &&
+                Math.hypot(n.x - x, n.y - y) <= n.radius + 8);
+            if (node) {
+                if (Math.hypot(node.x - player.x, node.y - player.y) > GATHER_RANGE) {
+                    addFloatingText(node.x, node.y - node.radius - 10, 'Muy lejos', '#ffd27a');
+                    return;
+                }
+                startGather(node);
                 return;
             }
         }
 
-        // 0) ¿Se hizo click sobre un portal? -> teletransporta solo si está
-        // cerca (ver PORTAL_HINT_RADIUS); si no, activatePortal no hace nada.
-        const clickedPortal = portals.find(p => Math.hypot(p.x - x, p.y - y) <= p.radius + 8);
-        if (clickedPortal) {
-            const distToPlayer = Math.hypot(clickedPortal.x - player.x, clickedPortal.y - player.y);
-            if (distToPlayer > PORTAL_HINT_RADIUS) {
-                addFloatingText(clickedPortal.x, clickedPortal.y - clickedPortal.radius - 10, 'Muy lejos', '#ffd27a');
-                return;
-            }
-            activatePortal(clickedPortal);
-            return;
-        }
+        // 3) Nada interactuable en ese punto (o hay un enemigo activo cerca):
+        // Ataque 1, apuntando hacia el click. La Taberna no tiene enemigos.
+        if (inTaberna) return;
+        Combat.tryAttack(0, { x, y });
+    }
 
-        // 1) ¿Se hizo click sobre un enemigo? -> iniciar combate si está cerca
-        let clickedEnemy = null, bestDist = Infinity;
-        enemies.forEach(en => {
-            if (!en.alive) return;
-            const d = Math.hypot(en.x - x, en.y - y);
-            if (d <= en.radius + 6 && d < bestDist) { bestDist = d; clickedEnemy = en; }
-        });
-
-        if (clickedEnemy) {
-            const distToPlayer = Math.hypot(clickedEnemy.x - player.x, clickedEnemy.y - player.y);
-            if (distToPlayer > ENGAGE_RANGE) {
-                addFloatingText(clickedEnemy.x, clickedEnemy.y - clickedEnemy.radius - 10, 'Muy lejos', '#ffd27a');
-                return;
-            }
-            engageEnemy(clickedEnemy);
-            return;
-        }
-
-        // 2) ¿Se hizo click sobre un cofre?
-        const clickedChest = chests.find(c => !c.opened && Math.hypot(c.x - x, c.y - y) <= c.radius + 8);
-        if (clickedChest) {
-            const distToPlayer = Math.hypot(clickedChest.x - player.x, clickedChest.y - player.y);
-            if (distToPlayer > CHEST_INTERACT_RANGE) {
-                addFloatingText(clickedChest.x, clickedChest.y - clickedChest.radius - 10, 'Muy lejos', '#ffd27a');
-                return;
-            }
-            startOpenChest(clickedChest);
-            return;
-        }
-
-        // 3) ¿Se hizo click sobre un nodo de recurso? Las profesiones de
-        // recolección siempre están disponibles, sin importar el arma equipada.
-        const node = nodes.find(n => !n.depleted &&
-            Math.hypot(n.x - x, n.y - y) <= n.radius + 8);
-        if (!node) return;
-
-        if (Math.hypot(node.x - player.x, node.y - player.y) > GATHER_RANGE) {
-            addFloatingText(node.x, node.y - node.radius - 10, 'Muy lejos', '#ffd27a');
-            return;
-        }
-
-        startGather(node);
+    // Click derecho: Ataque 2. Sin usos previos en este juego, así que se
+    // dedica entero al combate (preventDefault además evita el menú
+    // contextual del navegador).
+    function handleRightClick(x, y) {
+        if (dead || isAnyPanelOpen() || inTaberna) return;
+        Combat.tryAttack(1, { x, y });
     }
 
     function update(dt) {
@@ -1282,7 +1275,13 @@
         player.tick(dt);
         updateCamera();
 
+        // Combate en tiempo real: persecución/ataques de enemigos, cooldowns,
+        // carga del Ataque 3, efectos visuales activos (ver combat.js).
+        if (!inTaberna) Combat.updateRealtime(dt, enemies, player, dungeon);
+        checkPlayerDeath();
+
         nodes.forEach(n => n.update(dt));
+        processChestPendingSpawns();
         tickSpawnZones();
         const zoneHere = findPlayerSpawnZone();
         UI.updateSpawnZoneHUD(zoneHere ? {
@@ -1304,6 +1303,7 @@
         UI.updateHUD(player);
         UI.updateBossCounter(player, inTaberna, finalBossAlive);
         UI.updateFinalBossNotification(player, inTaberna);
+        UI.updateCombatHUD(player, inTaberna);
         UI.showLevelToasts(player);
     }
 
@@ -1365,6 +1365,18 @@
         ctx.fillText(weaponEmoji, player.x, player.y + 1);
     }
 
+    // Anillo circular alrededor del jugador mientras se mantiene R con las
+    // 10 cargas (ver Combat.charging/RT_CHARGE_RING_MS en combat.js).
+    function drawChargeRing() {
+        if (!Combat.charging) return;
+        const progress = Math.min(1, (Date.now() - Combat.chargeStartAt) / RT_CHARGE_RING_MS);
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, player.radius + 10, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+        ctx.strokeStyle = getAttackGeometry(player.activeProfession, 2).color;
+        ctx.lineWidth = 4;
+        ctx.stroke();
+    }
+
     function drawRarityRing(x, y, radius, color) {
         ctx.beginPath();
         ctx.arc(x, y, radius + 4, 0, Math.PI * 2);
@@ -1373,14 +1385,24 @@
         ctx.stroke();
     }
 
-    function drawEngageRing(x, y, radius) {
-        ctx.beginPath();
-        ctx.setLineDash([4, 3]);
-        ctx.arc(x, y, radius + 6, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,107,107,0.65)';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.setLineDash([]);
+    // Auras de estado (ver EFECTOS VISUALES GENERALES): un anillo por
+    // efecto activo, dibujados en capas concéntricas si hay varios a la vez.
+    const STATUS_AURA_COLORS = { burn: 'rgba(255,92,92,0.75)', bleed: 'rgba(196,30,58,0.75)', stun: 'rgba(255,224,102,0.8)', defenseMod: 'rgba(150,120,255,0.7)' };
+    function drawStatusAuras(en) {
+        const now = Date.now();
+        let ring = 0;
+        const draw = key => {
+            ctx.beginPath();
+            ctx.arc(en.x, en.y, en.radius + 6 + ring * 5, 0, Math.PI * 2);
+            ctx.strokeStyle = STATUS_AURA_COLORS[key];
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+            ring++;
+        };
+        if (en.burn && now < en.burn.expiresAt) draw('burn');
+        if (en.bleed && now < en.bleed.expiresAt) draw('bleed');
+        if (en.stunUntil > now) draw('stun');
+        if (en.defenseMod && now < en.defenseMod.expiresAt) draw('defenseMod');
     }
 
     function drawHealthBar(x, y, radius, pct, color) {
@@ -1398,9 +1420,12 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         if (!chest.unlocked) {
-            ctx.font = 'bold 13px sans-serif';
+            const aliveGuards = countAliveChestGuards(chest);
+            ctx.font = 'bold 12px sans-serif';
             ctx.fillStyle = '#fff';
-            ctx.fillText(`${chest.kills}/${chest.requiredKills}`, chest.x, chest.y + chest.radius + 16);
+            ctx.fillText(`👹 ${aliveGuards}/${chest.guardTarget}`, chest.x, chest.y + chest.radius + 15);
+            ctx.fillStyle = '#ffd27a';
+            ctx.fillText(`Progreso: ${chest.zoneKills}/${chest.guardTarget}`, chest.x, chest.y + chest.radius + 29);
         } else if (opening && opening.chest === chest) {
             drawHealthBar(chest.x, chest.y, chest.radius, opening.elapsed / CHEST_OPEN_TIME, '#ffd27a');
             ctx.font = 'bold 12px sans-serif';
@@ -1530,14 +1555,15 @@
 
         enemies.forEach(en => {
             if (!en.alive) return;
-            const engageable = Math.hypot(en.x - player.x, en.y - player.y) <= ENGAGE_RANGE;
-            if (engageable) drawEngageRing(en.x, en.y, en.radius);
+            drawStatusAuras(en);
             drawEntity(en.x, en.y, en.radius, en.type.emoji, en.type.color);
             if (en.type.rarity) drawRarityRing(en.x, en.y, en.radius, en.type.rarity.color);
             drawHealthBar(en.x, en.y, en.radius, en.hp / en.maxHp, en.type.isBoss ? '#ffd27a' : '#ff5c5c');
         });
 
         drawPlayerEntity();
+        Combat.renderEffects(ctx);
+        drawChargeRing();
 
         ctx.font = 'bold 14px sans-serif';
         ctx.textAlign = 'center';

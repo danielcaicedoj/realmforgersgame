@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Forjadores del Reino — RPG de Armas</title>
-<link rel="stylesheet" href="styles.css?v=98">
+<link rel="stylesheet" href="styles.css?v=107">
 </head>
 <body>
 <div id="game-container">
@@ -185,39 +185,33 @@
         <div id="floors-body" class="panel-body"></div>
     </div>
 
-    <!-- Pantalla de Combate por Turnos -->
-    <div id="combat-panel" class="panel combat-panel hidden">
-        <div class="panel-header">
-            <h2>⚔️ COMBATE</h2>
-        </div>
-        <div class="panel-body">
-            <div id="combat-turn-order" class="combat-turn-order"></div>
-            <div id="combat-status" class="combat-status"></div>
-            <div id="combat-enemies" class="combat-enemies"></div>
-            <div id="combat-player" class="combat-enemy-card combat-player-card"></div>
-            <div id="combat-log" class="combat-log"></div>
-            <div id="combat-potions" class="combat-potions"></div>
-            <div id="combat-ap-info" class="combat-ap-info hidden"></div>
-            <div id="combat-attacks" class="combat-attacks"></div>
-            <div class="combat-actions">
-                <button id="combat-endturn-btn" class="combat-btn">⏭️ Terminar Turno</button>
+    <!-- HUD de Combate en Tiempo Real (ver combat.js): 3 cooldowns +
+         carga universal + panel del enemigo más cercano. Reemplaza la
+         vieja pantalla modal de combate por turnos. -->
+    <div id="combat-hud">
+        <div id="cooldown-row">
+            <div class="cooldown-circle" id="cd-circle-0" style="--cd-pct:0deg">
+                <span class="cd-key">🖱️Izq</span>
+                <span class="cd-timer" id="cd-timer-0">✓</span>
+            </div>
+            <div class="cooldown-circle" id="cd-circle-1" style="--cd-pct:0deg">
+                <span class="cd-key">🖱️Der</span>
+                <span class="cd-timer" id="cd-timer-1">✓</span>
+            </div>
+            <div class="cooldown-circle cooldown-circle-special" id="cd-circle-2" style="--cd-pct:0deg">
+                <span class="cd-key">R</span>
+                <span class="cd-timer" id="cd-timer-2">0/10</span>
             </div>
         </div>
+        <div id="charge-bar-track"><div id="charge-bar-fill"></div></div>
+        <div id="charge-bar-text">Cargas: 0/10</div>
     </div>
 
-    <!-- Pantalla de Victoria / Drops -->
-    <div id="victory-panel" class="panel victory-panel hidden">
-        <div class="panel-header">
-            <h2>🏆 VICTORIA</h2>
-        </div>
-        <div class="panel-body">
-            <div class="panel-note">Derrotaste a:</div>
-            <div id="victory-summary" class="victory-summary"></div>
-            <div id="victory-xp" class="victory-xp"></div>
-            <div class="panel-note">Objetos obtenidos:</div>
-            <div id="victory-drops" class="combat-enemies"></div>
-            <button id="victory-continue-btn" class="apply-btn">Continuar</button>
-        </div>
+    <!-- Panel del enemigo vivo más cercano (ver updateCombatHUD en ui.js). -->
+    <div id="nearby-enemy-panel" class="hidden">
+        <div id="nearby-enemy-name"></div>
+        <div class="mini-bar-track"><div id="nearby-enemy-hp-fill" class="mini-bar-fill hp-fill"></div></div>
+        <div id="nearby-enemy-hp-text"></div>
     </div>
 
     <div id="game-over" class="hidden">
@@ -230,20 +224,20 @@
     <div id="teleport-fade" class="hidden"></div>
 </div>
 
-<script src="js/constants.js?v=98"></script>
-<script src="js/foods.js?v=98"></script>
-<script src="js/weapon-attacks.js?v=98"></script>
-<script src="js/floors.js?v=98"></script>
-<script src="js/grid-dungeon.js?v=98"></script>
-<script src="js/enchantments.js?v=98"></script>
-<script src="js/mounts.js?v=98"></script>
-<script src="js/shop.js?v=98"></script>
-<script src="js/weapons.js?v=98"></script>
-<script src="js/storage.js?v=98"></script>
-<script src="js/player.js?v=98"></script>
-<script src="js/enemy.js?v=98"></script>
-<script src="js/combat.js?v=98"></script>
-<script src="js/ui.js?v=98"></script>
-<script src="js/game.js?v=98"></script>
+<script src="js/constants.js?v=107"></script>
+<script src="js/foods.js?v=107"></script>
+<script src="js/weapon-attacks.js?v=107"></script>
+<script src="js/floors.js?v=107"></script>
+<script src="js/grid-dungeon.js?v=107"></script>
+<script src="js/enchantments.js?v=107"></script>
+<script src="js/mounts.js?v=107"></script>
+<script src="js/shop.js?v=107"></script>
+<script src="js/weapons.js?v=107"></script>
+<script src="js/storage.js?v=107"></script>
+<script src="js/player.js?v=107"></script>
+<script src="js/enemy.js?v=107"></script>
+<script src="js/combat.js?v=107"></script>
+<script src="js/ui.js?v=107"></script>
+<script src="js/game.js?v=107"></script>
 </body>
 </html>

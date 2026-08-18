@@ -1,6 +1,11 @@
 // ===== CLASE ENEMY =====
-// Los enemigos son estáticos en el mundo: no persiguen ni atacan hasta que
-// el jugador hace click sobre ellos e inicia un combate por turnos.
+// Combate en tiempo real: los enemigos detectan al jugador dentro de
+// ENEMY_VISUAL_RANGE, lo persiguen caminando, se detienen a
+// ENEMY_ATTACK_RANGE y atacan con su propio timer (ver Combat.updateRealtime
+// en combat.js, que llama a update() cada frame y dispara el ataque cuando
+// corresponde). Los efectos de estado (quemadura/sangrado/debuffs/aturdido)
+// ahora son real-time: expiresAt (timestamp) en vez de turnsLeft, y las
+// quemaduras/sangrados tickean 1 vez por segundo (ver tickStatusEffects).
 
 class Enemy {
     constructor(typeDef, x, y) {
@@ -12,22 +17,33 @@ class Enemy {
         this.radius = typeDef.radius;
         this.alive = true;
 
-        // Efectos de estado (combate por turnos)
-        this.burn = null;        // { dmg, turnsLeft }
-        this.bleed = null;       // { dmg, turnsLeft }
-        this.stunned = false;    // pierde su próximo turno
-        this.defenseMod = null;  // { percent, flat, turnsLeft }
-        this.attackMod = null;   // { flat, turnsLeft }
+        // Velocidad de persecución: enemigos livianos (radio chico) son más
+        // rápidos, los pesados/grandes (jefes) más lentos.
+        this.speed = Math.max(1.2, Math.min(3.2, 3.6 - this.radius * 0.03));
 
-        // Estado de habilidad de jefe (turnos desde la última invocación, escudo activo, etc.)
-        this.abilityState = { turnsSinceUse: 0, shieldTurnsLeft: 0 };
+        // IA en tiempo real (ver Combat.updateRealtime).
+        this.aiState = 'idle'; // 'idle' | 'chasing' | 'attacking' | 'stunned'
+        this.nextAttackAt = 0;
+        this._deathHandled = false; // evita otorgar loot dos veces si muere por DoT
+
+        // Efectos de estado (real-time, ver tickStatusEffects).
+        this.burn = null;        // { dmgPerSec, expiresAt, lastTickAt }
+        this.bleed = null;       // { dmgPerSec, expiresAt, lastTickAt }
+        this.stunUntil = 0;      // Date.now() hasta el cual no se mueve ni ataca
+        this.defenseMod = null;  // { percent, flat, expiresAt }
+        this.attackMod = null;   // { flat, expiresAt }
+
+        // Estado de habilidad de jefe (ver Combat.tickBossAbility): contador
+        // de ataques propios desde el último uso (reemplaza "turnos desde
+        // el último uso"), y escudo temporal de daño reducido.
+        this.abilityState = { attacksSinceUse: 0, shieldUntil: 0 };
     }
 
     // flatPenetration: reducción PLANA de defensa (ver estadística Destreza,
     // +0.1 por punto, constants.js), aplicada DESPUÉS del % de penetración.
     getEffectiveDefense(penetratePercent, flatPenetration) {
         let defense = this.type.defense || 0;
-        if (this.defenseMod && this.defenseMod.turnsLeft > 0) {
+        if (this.defenseMod && Date.now() < this.defenseMod.expiresAt) {
             defense = defense * (1 - this.defenseMod.percent) - this.defenseMod.flat;
         }
         defense = Math.max(0, defense);
@@ -41,12 +57,67 @@ class Enemy {
         const penetrate = (opts && opts.penetratePercent) || 0;
         const flatPenetration = (opts && opts.flatPenetration) || 0;
         let dmg = amount;
-        if (this.abilityState.shieldTurnsLeft > 0) dmg *= 0.5; // ej. Espectro Oscuro / Sombra del Abismo
+        if (Date.now() < this.abilityState.shieldUntil) dmg *= 0.5; // ej. Espectro Oscuro / Sombra del Abismo
         const defense = this.getEffectiveDefense(penetrate, flatPenetration);
         const finalDmg = Math.max(1, Math.round((dmg - defense) * 10) / 10);
         this.hp = Math.max(0, this.hp - finalDmg);
         if (this.hp <= 0) this.alive = false;
         return finalDmg;
+    }
+
+    // Tickea quemadura/sangrado (1 daño de tick por segundo real) y limpia
+    // stun/debuffs vencidos. Llamado cada frame desde update().
+    tickStatusEffects() {
+        const now = Date.now();
+        [['burn'], ['bleed']].forEach(([key]) => {
+            const dot = this[key];
+            if (!dot) return;
+            if (now >= dot.expiresAt) { this[key] = null; return; }
+            if (now - dot.lastTickAt >= 1000) {
+                dot.lastTickAt += 1000;
+                this.hp = Math.max(0, this.hp - dot.dmgPerSec);
+                if (this.hp <= 0) this.alive = false;
+            }
+        });
+        if (this.defenseMod && now >= this.defenseMod.expiresAt) this.defenseMod = null;
+        if (this.attackMod && now >= this.attackMod.expiresAt) this.attackMod = null;
+    }
+
+    // Movimiento + estado de IA. No dispara el ataque en sí (eso lo hace
+    // Combat.updateRealtime chequeando aiState==='attacking' y nextAttackAt).
+    update(dt, player, isWalkable) {
+        if (!this.alive) return;
+        this.tickStatusEffects();
+        if (!this.alive) return; // pudo morir por DoT en este mismo frame
+
+        const now = Date.now();
+        if (now < this.stunUntil) {
+            this.aiState = 'stunned';
+            return;
+        }
+
+        const dist = Math.hypot(player.x - this.x, player.y - this.y);
+
+        if (dist > ENEMY_LEASH_RANGE) {
+            this.aiState = 'idle';
+            return;
+        }
+        if (dist <= ENEMY_ATTACK_RANGE) {
+            this.aiState = 'attacking';
+            return;
+        }
+        if (dist <= ENEMY_VISUAL_RANGE || this.aiState === 'chasing' || this.aiState === 'attacking') {
+            this.aiState = 'chasing';
+            const dirX = player.x - this.x, dirY = player.y - this.y;
+            const len = Math.hypot(dirX, dirY) || 1;
+            const step = this.speed * (dt / 16);
+            const nx = this.x + (dirX / len) * step;
+            const ny = this.y + (dirY / len) * step;
+            if (!isWalkable || isWalkable(nx, this.y, this.radius)) this.x = nx;
+            if (!isWalkable || isWalkable(this.x, ny, this.radius)) this.y = ny;
+        } else {
+            this.aiState = 'idle';
+        }
     }
 }
 
@@ -96,23 +167,28 @@ function spawnResourceNodeInDungeon(type, dungeon, excludeRoom) {
 }
 
 // ===== COFRES =====
-// Nodos que no reaparecen. Se desbloquean venciendo enemigos cerca (ver
-// CHEST_REQUIRED_KILLS) y luego se abren con una carga corta, como recolectar.
+// Nodos que no reaparecen. Están custodiados por una población de
+// guardianes escalada por piso (ver rollChestGuardTarget en constants.js);
+// solo cuentan las muertes DENTRO de la zona (CHEST_ZONE_RADIUS) — un
+// guardián atraído lejos y matado ahí no suma progreso pero sí se repone
+// (ver spawnChestGuard/registerChestKill en game.js). Se abren con una
+// carga corta, como recolectar, una vez desbloqueados.
 class Chest {
-    constructor(x, y, rarity) {
+    constructor(x, y, rarity, guardTarget) {
         this.x = x;
         this.y = y;
         this.radius = 22;
         this.rarity = rarity;
-        this.kills = 0;
-        this.requiredKills = CHEST_REQUIRED_KILLS;
+        this.guardTarget = guardTarget; // población objetivo de guardianes Y denominador del progreso
+        this.zoneKills = 0; // enemigos derrotados DENTRO de la zona (progreso de desbloqueo)
         this.unlocked = false;
         this.opened = false;
+        this.pendingSpawns = []; // timestamps (ms epoch) de reposiciones de guardianes en curso
     }
 
-    registerNearbyKill() {
+    registerZoneKill() {
         if (this.unlocked || this.opened) return;
-        this.kills = Math.min(this.requiredKills, this.kills + 1);
-        if (this.kills >= this.requiredKills) this.unlocked = true;
+        this.zoneKills = Math.min(this.guardTarget, this.zoneKills + 1);
+        if (this.zoneKills >= this.guardTarget) this.unlocked = true;
     }
 }
