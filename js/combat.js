@@ -42,6 +42,11 @@ const Combat = {
     // Arquero=ENFOQUE, Mago=AMPLIFICACIÓN ARCANA, Tanque=RESISTENCIA.
     classCharge: { prof: null, count: 0 },
 
+    // Ataque 2: habilidad toggle por clase (ver RT_TOGGLE_SKILLS en
+    // constants.js). `stacks` se gana por CADA enemigo muerto mientras está
+    // activa y se pierde al desactivar o cambiar de profesión activa.
+    skill2: { active: false, profId: null, stacks: 0, activateCooldownUntil: 0, lastTickAt: 0, orbitStartAt: 0 },
+
     potionCooldownUntil: 0,
 
     onKillHook: null,       // (enemyInstance) => void; lo setea game.js para el spawn dinámico de jefes
@@ -57,6 +62,7 @@ const Combat = {
         this.charge = 0;
         this.charging = false;
         this.classCharge = { prof: null, count: 0 };
+        this.skill2 = { active: false, profId: null, stacks: 0, activateCooldownUntil: 0, lastTickAt: 0, orbitStartAt: 0 };
         this.potionCooldownUntil = 0;
         this._basicStreak = 0;
         this.effects = [];
@@ -112,9 +118,27 @@ const Combat = {
             this.fireCharge();
         }
 
+        // Habilidad toggle del Ataque 2 (ver RT_TOGGLE_SKILLS): se apaga
+        // sola si el jugador cambió de clase activa (los orbitales son
+        // propios de esa clase/arma), y dispara su pulso automático cada
+        // `cfg.tickMs` (PROPIO de cada clase, ver RT_TOGGLE_SKILLS) mientras
+        // esté activa.
+        if (this.skill2.active && this.skill2.profId !== player.activeProfession) {
+            this.skill2.active = false;
+            this.skill2.stacks = 0;
+        }
+        if (this.skill2.active) {
+            const skill2Cfg = RT_TOGGLE_SKILLS[this.skill2.profId];
+            const tickMs = (skill2Cfg && skill2Cfg.tickMs) || 500;
+            if (now - this.skill2.lastTickAt >= tickMs) {
+                this.skill2.lastTickAt = now;
+                this.tickToggleSkill();
+            }
+        }
+
         enemies.forEach(en => {
             if (!en.alive) return;
-            en.update(dt, player, (x, y, r) => dungeon.isWalkable(x, y, r));
+            en.update(dt, player, dungeon);
             if (!en.alive) {
                 if (!en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
                 return;
@@ -122,8 +146,11 @@ const Combat = {
             if (en.aiState === 'attacking' && now >= en.nextAttackAt) {
                 this.performEnemyAttackRT(en);
                 if (!en.alive) { en._deathHandled = true; return; }
-                const [minD, maxD] = ENEMY_ATTACK_DELAY_MS;
-                en.nextAttackAt = now + minD + Math.random() * (maxD - minD);
+                // Velocidad de ataque por RAREZA (no por piso/nivel, ver
+                // MONSTER_RARITIES.attackIntervalMs): Común 1s .. Mítico
+                // 0.5s (2 ataques/seg), fija — sin el rango aleatorio viejo.
+                const intervalMs = (en.type.rarity && en.type.rarity.attackIntervalMs) || 1000;
+                en.nextAttackAt = now + intervalMs;
             }
         });
     },
@@ -143,7 +170,11 @@ const Combat = {
         if (atk.arrowCost && this.player.arrows < atk.arrowCost) return false;
 
         const profId = this.player.activeProfession;
-        this.cooldownUntil[slot] = now + getAttackCooldownMs(profId, slot, this.player.level);
+        let cdMs = getAttackCooldownMs(profId, slot, this.player.level);
+        // Pícaro/Arquero: la habilidad toggle activa reduce el cooldown del
+        // Ataque 1 por stack (ver RT_TOGGLE_SKILLS.cdMsPerStack/cdMsMax).
+        if (slot === 0) cdMs = Math.max(100, cdMs - this.getSkill2CooldownReductionMs(profId));
+        this.cooldownUntil[slot] = now + cdMs;
         if (atk.arrowCost) { for (let i = 0; i < atk.arrowCost; i++) this.player.useArrow(); }
 
         this.resolvePlayerAttack(slot, atk, aimWorldPos);
@@ -169,6 +200,190 @@ const Combat = {
     fireCharge() {
         this.charging = false;
         this.tryAttack(2, null);
+    },
+
+    // ----- ATAQUE 2: HABILIDAD TOGGLE (ver RT_TOGGLE_SKILLS) -----
+    // Click derecho ya no dispara un golpe: activa/desactiva la habilidad de
+    // objetos orbitales/círculo de la clase activa. Reactivar tras
+    // desactivar exige esperar `activateCooldownMs`; los stacks se pierden
+    // al desactivar.
+    toggleSkill2() {
+        if (!this.player || this.player.hp <= 0) return false;
+        const profId = this.player.activeProfession;
+        const now = Date.now();
+
+        if (this.skill2.active && this.skill2.profId === profId) {
+            const cfg = RT_TOGGLE_SKILLS[profId];
+            this.skill2.active = false;
+            this.skill2.stacks = 0;
+            if (this.spawnFloatingText && cfg) {
+                this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `${cfg.name} desactivada`, '#a0a0a0');
+            }
+            return true;
+        }
+
+        if (now < this.skill2.activateCooldownUntil) return false;
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!cfg) return false;
+
+        this.skill2 = { active: true, profId, stacks: 0, activateCooldownUntil: now + cfg.activateCooldownMs, lastTickAt: now, orbitStartAt: now };
+        if (this.spawnFloatingText) {
+            this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `${cfg.name} activada`, cfg.color);
+        }
+        return true;
+    },
+
+    // Pulso automático de daño mientras la habilidad toggle está activa:
+    // golpea a todos los enemigos dentro de `cfg.radius`. El daño es PROPIO
+    // de la habilidad (cfg.dmgBase, calibrado a Tier 1 por diseño — ver
+    // RT_TOGGLE_SKILLS), ya no lee weaponAttacks.basic[1] (dato muerto).
+    // Escala con el arma igual que cualquier otro ataque (tier.mult ×
+    // rareza.mult, mismo patrón que getWeaponForLevel). No consume flechas
+    // ni ningún otro recurso — es un aura ambiental mientras dure el toggle.
+    tickToggleSkill() {
+        const player = this.player;
+        const profId = this.skill2.profId;
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!cfg) return;
+
+        const effRadius = this.getSkill2EffectiveRadius(profId);
+        const targets = this.getEnemiesInCircle(player.x, player.y, effRadius);
+        if (!targets.length) return;
+
+        const eff = player.getActiveEnchantEffects();
+        const weapon = player.getCurrentWeapon();
+        const tierMult = weapon.tier ? weapon.tier.mult : 1;
+        const rarityMult = weapon.rarity ? weapon.rarity.mult : 1;
+        const baseDamage = cfg.dmgBase * tierMult * rarityMult;
+        const potenciaMult = 1 + player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
+        let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
+        dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
+
+        const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
+        const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+        const effectiveAtk = {
+            damage: dmg,
+            critChance: critBase + eff.critChanceBonus,
+            critMultiplier: Math.max(1.5, eff.critMultiplier),
+            penetratePercent: Math.min(0.95, eff.ignoreDefensePercent),
+            flatPenetration,
+        };
+
+        const { totalDamage } = this.resolveAttackDamage(effectiveAtk, targets, eff);
+
+        // Carga universal: +1 por enemigo golpeado (igual que Ataque1).
+        this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
+
+        const lifestealPct = (eff.lifestealPercent || 0) + this.getSkill2LifestealBonusPercent(profId);
+        if (lifestealPct > 0 && totalDamage > 0) {
+            const healAmt = Math.round(totalDamage * lifestealPct);
+            if (healAmt > 0) player.heal(healAmt);
+        }
+
+        // Anillo breve marcando el pulso (radio casi fijo: startRange muy
+        // cerca de range, así se ve como un destello del círculo entero en
+        // vez de una onda que crece desde el centro).
+        this.effects.push({ kind: 'circle', followPlayer: true, range: effRadius, startRange: effRadius * 0.85, color: cfg.color, createdAt: Date.now(), duration: 200 });
+    },
+
+    // Bonos por stack de la habilidad toggle activa (0 si no está activa o
+    // si `profId` no coincide con la clase activa de la habilidad, ver
+    // RT_TOGGLE_SKILLS para qué clase usa cada campo `*PerStack`/`*Max`).
+    _skill2Active(profId) {
+        return this.skill2.active && this.skill2.profId === profId;
+    },
+    getSkill2DamageBonusPercent(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.dmgPctPerStack) return 0;
+        return Math.min(cfg.dmgPctMax, cfg.dmgPctPerStack * this.skill2.stacks);
+    },
+    getSkill2SpeedBonusPercent(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.speedPctPerStack) return 0;
+        return Math.min(cfg.speedPctMax, cfg.speedPctPerStack * this.skill2.stacks);
+    },
+    getSkill2CooldownReductionMs(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.cdMsPerStack) return 0;
+        return Math.min(cfg.cdMsMax, cfg.cdMsPerStack * this.skill2.stacks);
+    },
+    getSkill2LifestealBonusPercent(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.lifestealPctPerStack) return 0;
+        return Math.min(cfg.lifestealPctMax, cfg.lifestealPctPerStack * this.skill2.stacks);
+    },
+    getSkill2DefenseBonusPercent(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.defPctPerStack) return 0;
+        return Math.min(cfg.defPctMax, cfg.defPctPerStack * this.skill2.stacks);
+    },
+
+    // Radio efectivo del círculo exterior/alcance de la habilidad toggle:
+    // el `radius` base de RT_TOGGLE_SKILLS escala +3% por Tier del arma
+    // equipada (Bronce=+0%, Hierro=+3%, ... Absoluto=+27%) y +3% por nivel
+    // de rareza (Común=+0%, Poco Común=+3%, ... Mítico=+15%) — ambos
+    // aditivos, se multiplican entre sí. El arma "automática" (sin
+    // craftear) no tiene rareza propia, cuenta como Común (+0%).
+    getSkill2EffectiveRadius(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!cfg || !this.player) return cfg ? cfg.radius : 0;
+        const weapon = this.player.getCurrentWeapon();
+        const tierId = weapon.tier ? weapon.tier.id : 1;
+        const rarityIdx = weapon.rarity ? Math.max(0, MONSTER_RARITIES.findIndex(r => r.id === weapon.rarity.id)) : 0;
+        const tierMult = 1 + 0.03 * (tierId - 1);
+        const rarityMult = 1 + 0.03 * rarityIdx;
+        return cfg.radius * tierMult * rarityMult;
+    },
+
+    // Dibuja los objetos orbitales/círculo de la habilidad toggle activa
+    // (llamado desde game.js/render(), DENTRO del translate de cámara).
+    // Implementado en canvas (no <div>/CSS, como sugería la especificación)
+    // para quedar consistente con el resto del pipeline visual del juego
+    // (mismo ctx.translate de cámara, mismo z-order que enemigos/efectos) —
+    // ver nota en el resumen de esta tarea.
+    renderSkill2(ctx) {
+        if (!this.skill2.active || !this.player) return;
+        const cfg = RT_TOGGLE_SKILLS[this.skill2.profId];
+        if (!cfg) return;
+        const player = this.player;
+        const now = Date.now();
+        const rotation = cfg.orbitMs > 0 ? ((now - this.skill2.orbitStartAt) % cfg.orbitMs) / cfg.orbitMs * Math.PI * 2 : 0;
+        const effRadius = this.getSkill2EffectiveRadius(this.skill2.profId);
+
+        ctx.beginPath();
+        ctx.arc(player.x, player.y, effRadius, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.12;
+        ctx.strokeStyle = cfg.color;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Los objetos se dibujan sobre el círculo EXTERIOR (radio efectivo,
+        // el mismo anillo tenue de arriba) — es el mismo radio que el
+        // alcance real del pulso de daño automático.
+        for (let i = 0; i < cfg.objectCount; i++) {
+            const angle = rotation + (i / cfg.objectCount) * Math.PI * 2;
+            const ox = player.x + Math.cos(angle) * effRadius;
+            const oy = player.y + Math.sin(angle) * effRadius;
+            ctx.save();
+            ctx.translate(ox, oy);
+            ctx.rotate(angle); // apunta hacia AFUERA del círculo (radiante)
+            ctx.globalAlpha = 0.9;
+            ctx.fillStyle = cfg.color;
+            ctx.shadowColor = cfg.color;
+            ctx.shadowBlur = 8;
+            ctx.beginPath();
+            ctx.moveTo(-4, -12);
+            ctx.lineTo(4, -12);
+            ctx.lineTo(2, 12);
+            ctx.lineTo(-2, 12);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = 1;
+        // El conteo de stacks ya no se dibuja sobre la cabeza del jugador
+        // (redundante con #effects-hud, ver UI.updateEffectsHUD).
     },
 
     // Enemigos dentro de un cono frontal (usado por Ataque 1/2).
@@ -208,6 +423,7 @@ const Combat = {
         }
 
         let targets;
+        let waveMultipliers = null;
         if (slot === 2 || geometry.hitShape === 'circle') {
             targets = this.getEnemiesInCircle(player.x, player.y, geometry.range);
         } else if (geometry.hitShape === 'offsetCircle') {
@@ -216,6 +432,22 @@ const Combat = {
             const offX = player.x + dirX * geometry.offsetRange;
             const offY = player.y + dirY * geometry.offsetRange;
             targets = this.getEnemiesInCircle(offX, offY, geometry.range);
+        } else if (geometry.waveOffsets) {
+            // Triple onda en abanico (-45°/0°/+45°, ver RT_WAVE_FAN_OFFSETS):
+            // cada onda es un cono independiente; un enemigo alcanzado por
+            // varias recibe daño multiplicado UNA sola vez (no repetido),
+            // ver waveMultipliers más abajo y en resolveAttackDamage.
+            const hitCounts = new Map();
+            geometry.waveOffsets.forEach(offsetDeg => {
+                const rad = offsetDeg * Math.PI / 180;
+                const rDirX = dirX * Math.cos(rad) - dirY * Math.sin(rad);
+                const rDirY = dirX * Math.sin(rad) + dirY * Math.cos(rad);
+                this.getEnemiesInCone(player.x, player.y, rDirX, rDirY, geometry.range, geometry.angle).forEach(en => {
+                    hitCounts.set(en, (hitCounts.get(en) || 0) + 1);
+                });
+            });
+            targets = Array.from(hitCounts.keys());
+            waveMultipliers = hitCounts;
         } else {
             const inCone = this.getEnemiesInCone(player.x, player.y, dirX, dirY, geometry.range, geometry.angle);
             if (atk.aoe) {
@@ -244,6 +476,9 @@ const Combat = {
         const potenciaMult = 1 + player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
         let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
         if (isSecondAttack && eff.secondAttackBonusPercent) dmg *= (1 + eff.secondAttackBonusPercent);
+        // Guerrero/Mago: +daño% por stack de su habilidad toggle activa
+        // (ver RT_TOGGLE_SKILLS.dmgPctPerStack/dmgPctMax) — 0 si no aplica.
+        dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
 
         const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
@@ -262,7 +497,10 @@ const Combat = {
         if (hitLanded && atk.grantsClassCharge) chargeGranted = this.classChargeGain(profId);
         if (hitLanded && atk.consumesClassCharge) chargeConsumed = this.classChargeConsume(profId);
 
-        let extraLifestealPercent = 0;
+        // Bárbaro: +robo de vida% por stack de su habilidad toggle activa
+        // (ver RT_TOGGLE_SKILLS.lifestealPctPerStack/lifestealPctMax) — 0 si
+        // no aplica; se suma a lo que gane la rama `barbaro` más abajo.
+        let extraLifestealPercent = this.getSkill2LifestealBonusPercent(profId);
         let classNote = '';
 
         if (profId === 'guerrero' && atk.consumesClassCharge) {
@@ -336,7 +574,7 @@ const Combat = {
             classNote = `🛡️Escudo +${player.shield.amount} HP`;
         }
 
-        const { totalDamage, hadCrit } = this.resolveAttackDamage(effectiveAtk, targets, eff);
+        const { totalDamage, hadCrit } = this.resolveAttackDamage(effectiveAtk, targets, eff, waveMultipliers);
 
         // Salpicadura (Pícaro): golpea N enemigos cercanos adicionales
         // (fuera de `targets`) a un % del daño principal.
@@ -371,8 +609,15 @@ const Combat = {
             targets[0].defenseMod = { percent: atk.bonusDefenseDownPercent || 0, flat: 0, expiresAt: Date.now() + (atk.bonusDefenseDownTurns || 1) * 1000 };
         }
 
-        // Ataque 1 (slot 0): +1 carga universal SI conectó.
-        if (slot === 0 && hitLanded) this.charge = Math.min(RT_CHARGE_MAX, this.charge + 1);
+        // Ataque 1 (slot 0): +1 carga universal POR CADA enemigo golpeado
+        // (no un flat +1 por ataque) — golpear 3 enemigos da +3 cargas,
+        // tope RT_CHARGE_MAX.
+        if (slot === 0 && hitLanded) {
+            this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
+            if (targets.length > 1 && this.spawnFloatingText) {
+                this.spawnFloatingText(player.x, player.y - player.radius - 34, `+${targets.length} cargas`, '#66ccff', 700);
+            }
+        }
         if (slot === 2) this.charge = 0; // el especial consume las 10 cargas
 
         const totalDealt = totalDamage + bonusTotal;
@@ -389,8 +634,11 @@ const Combat = {
     // Aplica daño + efectos de un ataque a una LISTA de objetivos ya
     // determinada por geometría (cono/círculo, ver resolvePlayerAttack).
     // extraEffects: bonos de encantamiento (quemadura/sangrado/defensa
-    // adicionales, ver getActiveEnchantEffects en player.js).
-    resolveAttackDamage(atk, targets, extraEffects) {
+    // adicionales, ver getActiveEnchantEffects en player.js). waveMultipliers:
+    // Map opcional (enemy -> nº de ondas del abanico que lo alcanzaron, ver
+    // 'waveOffsets' en resolvePlayerAttack) — el daño se multiplica UNA vez
+    // por ese conteo, nunca se aplica el golpe repetido por onda.
+    resolveAttackDamage(atk, targets, extraEffects, waveMultipliers) {
         const player = this.player;
         const hits = atk.hits || 1;
         let totalDamage = 0;
@@ -398,10 +646,11 @@ const Combat = {
         const extra = extraEffects || {};
 
         targets.forEach(target => {
+            const waveMult = waveMultipliers ? (waveMultipliers.get(target) || 1) : 1;
             for (let h = 0; h < hits; h++) {
                 if (!target.alive) break;
 
-                let dmg = atk.damage;
+                let dmg = atk.damage * waveMult;
                 let crit = false;
                 if (atk.critChance && Math.random() < atk.critChance) {
                     dmg = dmg * (atk.critMultiplier || 1.5);
@@ -541,65 +790,67 @@ const Combat = {
     // moviendo mientras el efecto todavía está en pantalla (200-400ms), el
     // dibujo lo acompaña en vez de quedar "pegado" a donde estaba parado
     // al momento de disparar.
+    // Ningún ataque emite partículas viajeras (limpieza visual acordada):
+    // solo el trazo/proyectil principal de cada visual, más el destello de
+    // impacto de cada golpe (spawnImpactFlash, ver resolveAttackDamage).
     spawnAttackEffect(slot, dirX, dirY, geometry) {
         const player = this.player;
         const now = Date.now();
         const visual = geometry.visual || (geometry.hitShape === 'circle' ? 'circle' : 'cone');
         const duration = geometry.duration || (visual === 'circle' ? 400 : 220);
-        const particleCount = geometry.particleCount || 8;
-        const dirAngle = Math.atan2(dirY, dirX);
 
         if (visual === 'circle') {
             this.effects.push({ kind: 'circle', followPlayer: true, range: geometry.range, startRange: geometry.startRange || 0, color: geometry.color, createdAt: now, duration });
-            for (let i = 0; i < particleCount; i++) {
-                const a = Math.random() * Math.PI * 2;
-                const dist = geometry.range * (0.5 + Math.random() * 0.5);
-                this.effects.push({ kind: 'particle', x: player.x + Math.cos(a) * dist, y: player.y + Math.sin(a) * dist, vx: Math.cos(a) * 0.6, vy: Math.sin(a) * 0.6, color: geometry.particleColor, createdAt: now, duration: 320 });
-            }
+        } else if (visual === 'wave') {
+            // Onda(s) expansiva(s) direccional(es): arco(s) angosto(s) que
+            // crecen desde `startRange` hasta `range` sobre toda la
+            // duración, con alpha decreciente. `waveOffsets` (ej. [-45,0,45])
+            // lanza varias en abanico simultáneo en vez de una sola — ver
+            // RT_WAVE_FAN_OFFSETS y el cálculo de hitCounts en
+            // resolvePlayerAttack para el daño multiplicado por solape.
+            // `waveStaggerMs`: cada onda del abanico se dibuja
+            // `index * waveStaggerMs` más tarde (createdAt futuro) en vez de
+            // todas a la vez — renderEffects las ignora hasta que su
+            // createdAt llega, creando el efecto de "3 golpes rápidos" en
+            // vez de una onda ancha única.
+            const offsets = geometry.waveOffsets || [0];
+            const stagger = geometry.waveStaggerMs || 0;
+            offsets.forEach((offsetDeg, i) => {
+                const rad = offsetDeg * Math.PI / 180;
+                const rDirX = dirX * Math.cos(rad) - dirY * Math.sin(rad);
+                const rDirY = dirX * Math.sin(rad) + dirY * Math.cos(rad);
+                this.effects.push({ kind: 'wave', followPlayer: true, dirX: rDirX, dirY: rDirY, range: geometry.range, startRange: geometry.startRange || 0, angle: geometry.angle, lineWidth: geometry.lineWidth || 3, color: geometry.color, createdAt: now + i * stagger, duration });
+            });
         } else if (visual === 'slash') {
             // Corte/golpe direccional: arco trazado (no relleno), distinto
-            // del "cono" translúcido original.
+            // del "cono" translúcido original. Sin uso actual (las 4 clases
+            // cuerpo a cuerpo usan 'wave'), se deja disponible por si se
+            // reutiliza para otra clase.
             this.effects.push({ kind: 'slash', followPlayer: true, dirX, dirY, range: geometry.range, angle: geometry.angle, color: geometry.color, createdAt: now, duration });
-            for (let i = 0; i < particleCount; i++) {
-                const a = dirAngle + (Math.random() - 0.5) * (geometry.angle * Math.PI / 180);
-                const dist = geometry.range * (0.5 + Math.random() * 0.5);
-                this.effects.push({ kind: 'particle', x: player.x + Math.cos(a) * dist, y: player.y + Math.sin(a) * dist, vx: Math.cos(a) * 0.6, vy: Math.sin(a) * 0.6, color: geometry.particleColor, createdAt: now, duration: 280 });
-            }
         } else if (visual === 'arrow') {
             // Flecha recta (Arquero A1/A3); A3 usa `wide` para el trazo/
             // punta más gruesos (flecha "gigante").
             this.effects.push({ kind: 'arrow', followPlayer: true, dirX, dirY, range: geometry.range, wide: !!geometry.fragments, color: geometry.color, createdAt: now, duration });
-            const tipX = player.x + dirX * geometry.range, tipY = player.y + dirY * geometry.range;
-            const spread = geometry.fragments ? 40 : 12;
-            const spreadAngle = geometry.fragments ? Math.PI * 0.9 : Math.PI * 0.3;
-            for (let i = 0; i < particleCount; i++) {
-                const a = dirAngle + (Math.random() - 0.5) * spreadAngle;
-                this.effects.push({ kind: 'particle', x: tipX + Math.cos(a) * Math.random() * spread, y: tipY + Math.sin(a) * Math.random() * spread, vx: Math.cos(a) * 0.7, vy: Math.sin(a) * 0.7, color: geometry.particleColor, createdAt: now, duration: 280 });
-            }
         } else if (visual === 'arrowRain') {
             // Área desplazada frente al jugador (ver hitShape:'offsetCircle'
             // en resolvePlayerAttack): flechas cayendo desde arriba sobre
             // la zona, NO centrada en el jugador.
             const cx = player.x + dirX * geometry.offsetRange, cy = player.y + dirY * geometry.offsetRange;
             this.effects.push({ kind: 'arrowRain', x: cx, y: cy, range: geometry.range, color: geometry.color, createdAt: now, duration });
-            for (let i = 0; i < particleCount; i++) {
-                const rx = (Math.random() - 0.5) * 2 * geometry.range;
-                const rz = (Math.random() - 0.5) * 2 * geometry.range * 0.4;
-                this.effects.push({ kind: 'particle', x: cx + rx, y: cy + rz - 160 - Math.random() * 80, vx: 0, vy: 3, color: geometry.particleColor, createdAt: now, duration: 380 });
-            }
-        } else { // 'cone': relleno translúcido original (Mago/desarmado, sin cambios)
+        } else if (visual === 'coneArrows') {
+            // Arquero A1: mismo cono relleno que 'cone', más un abanico de
+            // flechas cortas DENTRO del arco — lo distingue del cono liso
+            // del Mago sin necesitar un render nuevo (reusa 'cone'+'arrow').
             this.effects.push({ kind: 'cone', followPlayer: true, dirX, dirY, range: geometry.range, angle: geometry.angle, color: geometry.color, createdAt: now, duration });
-            for (let i = 0; i < particleCount; i++) {
-                const a = dirAngle + (Math.random() - 0.5) * (geometry.angle * Math.PI / 180);
-                const dist = geometry.range * (0.3 + Math.random() * 0.6);
-                this.effects.push({
-                    kind: 'particle',
-                    x: player.x + Math.cos(a) * dist * 0.4,
-                    y: player.y + Math.sin(a) * dist * 0.4,
-                    vx: Math.cos(a) * 0.8, vy: Math.sin(a) * 0.8,
-                    color: geometry.particleColor, createdAt: now, duration: 320,
-                });
+            const dirAngle = Math.atan2(dirY, dirX);
+            const fanCount = 5;
+            for (let i = 0; i < fanCount; i++) {
+                const spread = (i / (fanCount - 1)) - 0.5; // -0.5..0.5
+                const a = dirAngle + spread * (geometry.angle * Math.PI / 180) * 0.8;
+                this.effects.push({ kind: 'arrow', followPlayer: true, dirX: Math.cos(a), dirY: Math.sin(a), range: geometry.range * 0.9, wide: false, color: geometry.color, createdAt: now, duration });
             }
+        } else { // 'cone': relleno translúcido original (Mago y, desde este rediseño, las 4 clases cuerpo a cuerpo)
+            this.effects.push({ kind: 'cone', followPlayer: true, dirX, dirY, range: geometry.range, angle: geometry.angle, color: geometry.color, createdAt: now, duration });
         }
     },
 
@@ -617,6 +868,7 @@ const Combat = {
         this.effects = this.effects.filter(e => now - e.createdAt < e.duration);
         const player = this.player;
         this.effects.forEach(e => {
+            if (now < e.createdAt) return; // onda escalonada (waveStaggerMs): aún no le toca aparecer
             const t = (now - e.createdAt) / e.duration;
             const alpha = Math.max(0, 1 - t);
             if (e.kind === 'cone') {
@@ -645,6 +897,24 @@ const Combat = {
                 ctx.strokeStyle = e.color;
                 ctx.lineWidth = 3;
                 ctx.stroke();
+            } else if (e.kind === 'wave') {
+                // Onda expansiva (Pícaro/Guerrero A1/A2): arco de ancho
+                // angular FIJO cuyo radio crece de startRange a range —
+                // a diferencia de 'slash', que barre el ángulo a radio ~fijo.
+                const ox = e.followPlayer ? player.x : e.x, oy = e.followPlayer ? player.y : e.y;
+                const halfAngle = (e.angle / 2) * Math.PI / 180;
+                const dirAngle = Math.atan2(e.dirY, e.dirX);
+                const startR = e.startRange || 0;
+                const r = startR + (e.range - startR) * t;
+                ctx.beginPath();
+                ctx.arc(ox, oy, r, dirAngle - halfAngle, dirAngle + halfAngle);
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = e.color;
+                ctx.lineWidth = e.lineWidth || 3;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                ctx.lineCap = 'butt';
+                ctx.lineWidth = 1;
             } else if (e.kind === 'slash') {
                 const ox = e.followPlayer ? player.x : e.x, oy = e.followPlayer ? player.y : e.y;
                 const halfAngle = (e.angle / 2) * Math.PI / 180;
@@ -692,14 +962,6 @@ const Combat = {
                 ctx.lineWidth = 2;
                 ctx.stroke();
                 ctx.globalAlpha = alpha * 0.15;
-                ctx.fillStyle = e.color;
-                ctx.fill();
-            } else if (e.kind === 'particle') {
-                e.x += e.vx * 16;
-                e.y += e.vy * 16;
-                ctx.globalAlpha = alpha;
-                ctx.beginPath();
-                ctx.arc(e.x, e.y, 3, 0, Math.PI * 2);
                 ctx.fillStyle = e.color;
                 ctx.fill();
             } else if (e.kind === 'flash') {
@@ -882,6 +1144,12 @@ const Combat = {
         const player = this.player;
         const rarity = target.type.rarity || MONSTER_RARITIES[0];
         const bossKind = target.type.bossKind;
+
+        // Habilidad toggle (Ataque 2): +1 stack por CADA enemigo muerto
+        // mientras está activa, sin importar qué lo mató (golpe, DoT, etc.).
+        if (this.skill2.active) {
+            this.skill2.stacks = Math.min(RT_TOGGLE_STACK_MAX, this.skill2.stacks + 1);
+        }
 
         if (target.type.isFinalBoss) {
             // El manejo de puntos/reinicio del Jefe Final vive en

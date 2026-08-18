@@ -48,6 +48,23 @@
     const keys = new Set();
     const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
 
+    // Ataque 1 (tecla "1" O click izquierdo, ver bindInput): mientras
+    // cualquiera de los dos esté presionado, update() dispara
+    // Combat.tryAttack(0, ...) cada frame — tryAttack ya no-opea sola si
+    // sigue en cooldown, así que esto reproduce "se dispara apenas termina
+    // el cooldown, se repite mientras se mantenga" sin necesitar un timer
+    // aparte. `lastAimWorldPos` es la posición del mouse más reciente
+    // (actualizada por mousemove/mousedown), usada como dirección de
+    // apuntado incluso si el disparo lo originó la tecla "1".
+    let attack1KeyHeld = false;
+    let attack1MouseHeld = false;
+    // null hasta el primer mousemove/mousedown — Combat.tryAttack ya
+    // defaultea a "apuntar hacia arriba" cuando aimWorldPos es falsy (ver
+    // resolvePlayerAttack), así que null es más seguro que un {x:0,y:0}
+    // fijo: ese apuntaría literalmente hacia la esquina del mundo si se
+    // presiona "1" antes de haber movido el mouse una sola vez.
+    let lastAimWorldPos = null;
+
     // El canvas ocupa toda la pantalla; se recalcula al redimensionar la ventana.
     function resizeCanvas() {
         CANVAS_WIDTH = window.innerWidth;
@@ -138,6 +155,22 @@
             minimapCtx.fill();
         });
 
+        // Mercader: solo existe dungeon.mercaderPos en la Taberna (ver
+        // generarTaberna en grid-dungeon.js), así que esto ya queda
+        // acotado a "cuando se está en Taberna" sin necesitar otro chequeo.
+        if (dungeon.mercaderPos) {
+            minimapCtx.font = '11px sans-serif';
+            minimapCtx.fillText('💰', dungeon.mercaderPos.x * scaleX, dungeon.mercaderPos.y * scaleY);
+        }
+        if (dungeon.artesanoPos) {
+            minimapCtx.font = '11px sans-serif';
+            minimapCtx.fillText('⚒️', dungeon.artesanoPos.x * scaleX, dungeon.artesanoPos.y * scaleY);
+        }
+        if (dungeon.hechiceroPos) {
+            minimapCtx.font = '11px sans-serif';
+            minimapCtx.fillText('✨', dungeon.hechiceroPos.x * scaleX, dungeon.hechiceroPos.y * scaleY);
+        }
+
         // Zonas de Spawn: contorno de círculo sin rellenar + indicador de
         // tiempo restante (ver SPAWN_ZONE_* en constants.js).
         drawSpawnZonesOnMap(minimapCtx, scaleX, scaleY, 1);
@@ -214,6 +247,20 @@
             mapLargeCtx.fill();
         });
 
+        // Mercader/Artesano/Hechicero (solo existen en la Taberna, ver drawMinimap).
+        if (dungeon.mercaderPos) {
+            mapLargeCtx.font = '20px sans-serif';
+            mapLargeCtx.fillText('💰', dungeon.mercaderPos.x * scaleX, dungeon.mercaderPos.y * scaleY);
+        }
+        if (dungeon.artesanoPos) {
+            mapLargeCtx.font = '20px sans-serif';
+            mapLargeCtx.fillText('⚒️', dungeon.artesanoPos.x * scaleX, dungeon.artesanoPos.y * scaleY);
+        }
+        if (dungeon.hechiceroPos) {
+            mapLargeCtx.font = '20px sans-serif';
+            mapLargeCtx.fillText('✨', dungeon.hechiceroPos.x * scaleX, dungeon.hechiceroPos.y * scaleY);
+        }
+
         drawSpawnZonesOnMap(mapLargeCtx, scaleX, scaleY, 2.4);
 
         mapLargeCtx.beginPath();
@@ -278,8 +325,13 @@
         // que se ve a través de los tiles de piso (transparentes en el
         // canvas — ver renderWallsGrid en grid-dungeon.js); la
         // "iluminación" se aplica como un tinte ambiental en render().
+        // El canvas tiene su PROPIO fondo CSS (ver styles.css) que queda
+        // encima del <body> y tapa lo que sea que se le ponga a este último
+        // — hay que pintar el color de piso en el canvas mismo, si no
+        // nunca se ve (bug: antes solo se pintaba document.body).
         currentBiome = dungeon.biome;
         document.body.style.background = currentBiome.floorColor;
+        canvas.style.background = currentBiome.floorColor;
 
         // El jugador siempre aparece en el centro exacto del mapa (ver
         // POSICION_JUGADOR_INICIO en grid-dungeon.js), no en una sala.
@@ -370,6 +422,7 @@
 
         currentBiome = dungeon.biome;
         document.body.style.background = currentBiome.floorColor;
+        canvas.style.background = currentBiome.floorColor;
 
         player.x = dungeon.posicionJugadorInicio.x;
         player.y = dungeon.posicionJugadorInicio.y;
@@ -385,6 +438,14 @@
         gathering = null;
         portals = [];
         portalsCercaHint = new Set();
+
+        // La Taberna no tiene combate, así que la tecla "2" para
+        // activar/desactivar la habilidad toggle queda bloqueada ahí (ver
+        // bindInput) — si estaba activa al entrar, el jugador no tendría
+        // forma de apagarla y los orbitales seguirían girando para siempre.
+        // Se apaga sola al entrar.
+        Combat.skill2.active = false;
+        Combat.skill2.stacks = 0;
 
         UI.updateFloorHUD(null, 0, false);
     }
@@ -427,7 +488,7 @@
         const rarity = getMonsterRarity(tierDef.rarities[Math.floor(Math.random() * tierDef.rarities.length)]);
 
         scaled.hp = Math.max(1, Math.round(scaled.hp * tierDef.mult));
-        scaled.dmg = Math.max(1, Math.round(scaled.dmg * tierDef.mult));
+        scaled.dmg = Math.max(1, Math.round(scaled.dmg * tierDef.dmgMult));
         scaled.xp = Math.round(scaled.xp * tierDef.mult);
         scaled.rarity = rarity;
         scaled.radius = Math.round(base.radius * tierDef.radiusMult);
@@ -459,14 +520,21 @@
         const pool = getEnemyPoolForFloor(floor);
         const base = pool[Math.floor(Math.random() * pool.length)];
         const scaled = buildScaledEnemyType(base, floor);
-        const mult = tierDef.mult * (0.5 + 0.5 * (pisoEnRango - 1) / 9);
-        // Vida x10 y daño x5 respecto al balance anterior (mismo `mult` base,
-        // solo se le suma un multiplicador extra a cada stat por separado).
-        scaled.hp = Math.max(1, Math.round(scaled.hp * mult * 10));
-        scaled.dmg = Math.max(1, Math.round(scaled.dmg * mult * 5));
-        scaled.xp = Math.round(scaled.xp * mult);
+        // El factor 0.5-1.0 (débil->fuerte dentro de su propio bloque de 10
+        // pisos) es compartido por HP y daño, pero cada uno usa su PROPIO
+        // multiplicador base: `tierDef.mult` (10) para HP/XP, sin cambios;
+        // `tierDef.dmgMult` (7.5, calibrado aparte) para daño — separados a
+        // propósito para poder afinar el daño (piso 1 ≈ 60-70) sin tocar la
+        // vida/loot del Jefe Final.
+        const rangeFactor = 0.5 + 0.5 * (pisoEnRango - 1) / 9;
+        const hpMult = tierDef.mult * rangeFactor;
+        const dmgMult = tierDef.dmgMult * rangeFactor;
+        scaled.hp = Math.max(1, Math.round(scaled.hp * hpMult * 10));
+        scaled.dmg = Math.max(1, Math.round(scaled.dmg * dmgMult));
+        scaled.xp = Math.round(scaled.xp * hpMult);
         scaled.rarity = getMonsterRarity('mitico');
         scaled.radius = Math.round(base.radius * tierDef.radiusMult);
+        scaled.attackRange = 150; // fijo, mayor alcance que cualquier enemigo normal (70-100px)
         scaled.isBoss = true;
         scaled.isFinalBoss = true;
         scaled.bossKind = 'jefe_final';
@@ -966,13 +1034,35 @@
             handleWorldClick(x, y);
         }, { passive: true });
 
-        // Click derecho: Ataque 2 (ver handleRightClick). preventDefault
-        // evita que el navegador abra su menú contextual.
-        canvas.addEventListener('contextmenu', e => {
-            e.preventDefault();
+        // Click derecho: DESHABILITADO como disparador del Ataque 2 (ver
+        // SISTEMA DE CONTROLES — ahora es la tecla "2"). Se conserva solo
+        // el preventDefault para que el menú contextual del navegador no
+        // interrumpa el juego.
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+        // Apuntado del Ataque 1: se actualiza con cada movimiento del mouse
+        // (para que el ataque continuo — tecla "1" o click mantenido — siga
+        // apuntando hacia donde está el cursor, no hacia donde estaba al
+        // presionar) y también al presionar, por si el mouse no se movió
+        // desde la última vez.
+        canvas.addEventListener('mousemove', e => {
             const canvasPos = getCanvasCoords(e.clientX, e.clientY);
-            const { x, y } = toWorldCoords(canvasPos.x, canvasPos.y);
-            handleRightClick(x, y);
+            lastAimWorldPos = toWorldCoords(canvasPos.x, canvasPos.y);
+        });
+
+        // Click izquierdo MANTENIDO: dispara Ataque 1 en bucle (ver
+        // update()). mouseup se escucha en window (no en canvas) para que
+        // soltar el botón fuera del canvas también detenga el ataque
+        // continuo — evita que quede "trabado" disparando.
+        canvas.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            const canvasPos = getCanvasCoords(e.clientX, e.clientY);
+            lastAimWorldPos = toWorldCoords(canvasPos.x, canvasPos.y);
+            attack1MouseHeld = true;
+        });
+        window.addEventListener('mouseup', e => {
+            if (e.button !== 0) return;
+            attack1MouseHeld = false;
         });
 
         // Notificación del Jefe Final (ver #final-boss-notification en
@@ -1014,12 +1104,37 @@
         window.addEventListener('keydown', e => {
             const key = e.key.toLowerCase();
 
-            // Ataque 3 (especial): mantener R carga si ya hay 10 cargas
-            // (ver Combat.startCharge); e.repeat evita reiniciar la carga
-            // en cada tick de auto-repeat del SO mientras se mantiene.
-            if (key === 'r' && !dead) {
+            // Ataque 1: tecla "1" mantenida dispara en bucle igual que
+            // mantener click izquierdo (ver update()); e.repeat evita
+            // reiniciar el estado en cada tick de auto-repeat del SO.
+            if (key === '1') {
                 e.preventDefault();
-                if (!e.repeat) Combat.startCharge();
+                if (!e.repeat) attack1KeyHeld = true;
+                return;
+            }
+
+            // Ataque 2: tecla "2" activa/desactiva la habilidad toggle (ver
+            // Combat.toggleSkill2) — reemplaza al click derecho.
+            if (key === '2') {
+                e.preventDefault();
+                if (!e.repeat && !dead && !isAnyPanelOpen() && !inTaberna) Combat.toggleSkill2();
+                return;
+            }
+
+            // Ataque 3 (especial): tecla "3" reemplaza a "R". Arquero es
+            // INSTANTÁNEO (dispara directo, sin el círculo de carga
+            // sostenida — corrección pedida explícitamente); el resto de
+            // las clases mantiene el mantener-presionado-para-cargar (ver
+            // Combat.startCharge). e.repeat evita reiniciar la carga/re-
+            // disparar en cada tick de auto-repeat del SO.
+            if (key === '3' && !dead) {
+                e.preventDefault();
+                if (e.repeat) return;
+                if (player.activeProfession === 'arquero') {
+                    Combat.tryAttack(2, null);
+                } else {
+                    Combat.startCharge();
+                }
                 return;
             }
 
@@ -1056,19 +1171,31 @@
             }
 
             if (key === 'i') { UI.renderInventory(player); UI.togglePanel('inventory-panel'); }
-            else if (key === 'e') { UI.renderEnchantments(player); UI.togglePanel('enchant-panel'); }
+            else if (key === 'e') { UI.renderEnchantments(player, isNearHechicero()); UI.togglePanel('enchant-panel'); }
             else if (key === 'm') { teleportPending = false; UI.togglePanel('map-panel'); }
-            else if (key === 'c') { UI.renderCraft(player); UI.togglePanel('craft-panel'); }
+            else if (key === 'c') { UI.renderCraft(player, isNearArtesano()); UI.togglePanel('craft-panel'); }
             else if (key === 'v') { UI.renderStats(player); UI.togglePanel('stats-panel'); }
             else if (key === 'p') { UI.renderFloors(player, inTaberna, floorBeforeTaberna); UI.togglePanel('floors-panel'); }
             else if (key === 'g') { UI.renderGuide(); UI.togglePanel('guide-panel'); }
             else if (key === 'h') { useFirstAvailablePotion(); }
+            else if (key === 'f') { usePotionHealMost(); }
             else if (key === 'r') { if (dead) respawn(); }
         });
 
         window.addEventListener('keyup', e => {
-            if (e.key.toLowerCase() === 'r') Combat.releaseCharge();
-            keys.delete(e.key.toLowerCase());
+            const key = e.key.toLowerCase();
+            if (key === '1') attack1KeyHeld = false;
+            if (key === '3') Combat.releaseCharge();
+            keys.delete(key);
+        });
+
+        // Si el usuario cambia de ventana/pestaña mientras mantiene "1" o el
+        // click izquierdo, el navegador puede no disparar mouseup/keyup —
+        // sin esto, el ataque continuo quedaría "trabado" disparando al
+        // volver. Ver "Cambio de Ventana" en la especificación.
+        window.addEventListener('blur', () => {
+            attack1KeyHeld = false;
+            attack1MouseHeld = false;
         });
     }
 
@@ -1076,6 +1203,20 @@
     // para conservar las mejores), con el cooldown de Combat.usePotionRT.
     function useFirstAvailablePotion() {
         for (const rarity of MONSTER_RARITIES) {
+            if ((player.materials[`pocion_${rarity.id}`] || 0) > 0) {
+                Combat.usePotionRT(rarity.id);
+                return;
+            }
+        }
+    }
+
+    // Tecla F: usa la poción disponible que MÁS cure (rareza más alta
+    // primero — getPotionHealAmount crece con rarity.mult, así que
+    // recorrer MONSTER_RARITIES al revés ya da "la que más cura"), mismo
+    // cooldown compartido de Combat.usePotionRT que la tecla H.
+    function usePotionHealMost() {
+        for (let i = MONSTER_RARITIES.length - 1; i >= 0; i--) {
+            const rarity = MONSTER_RARITIES[i];
             if ((player.materials[`pocion_${rarity.id}`] || 0) > 0) {
                 Combat.usePotionRT(rarity.id);
                 return;
@@ -1105,6 +1246,8 @@
     function checkPlayerDeath() {
         if (dead || player.hp > 0) return;
         dead = true;
+        attack1KeyHeld = false;
+        attack1MouseHeld = false;
         UI.showGameOver(true);
         player.save();
         UI.updateHUD(player);
@@ -1150,8 +1293,25 @@
         addFloatingText(node.x, node.y - 52, `+${qty} ${matInfo.emoji} ${matInfo.name}`, '#ffd27a');
     }
 
-    const MERCHANT_INTERACT_RANGE = 140;
-    const MERCHANT_CLICK_RADIUS = 44;
+    // Radios compartidos por los 3 "nodos de servicio" de la Taberna
+    // (Mercader/Artesano/Hechicero): click a menos de CLICK_RADIUS del
+    // nodo abre su ventana, pero solo si el jugador está a menos de
+    // INTERACT_RANGE (si no, "Muy lejos").
+    const TABERNA_NODE_INTERACT_RANGE = 140;
+    const TABERNA_NODE_CLICK_RADIUS = 44;
+
+    // El botón de Craftear/Encantar solo se habilita estando cerca del
+    // nodo correspondiente — ver UI.renderCraft/renderEnchantments. Fuera
+    // de la Taberna estos nodos ni existen (dungeon.artesanoPos/
+    // hechiceroPos son undefined), así que siempre dan false.
+    function isNearArtesano() {
+        return !!(inTaberna && dungeon.artesanoPos
+            && Math.hypot(dungeon.artesanoPos.x - player.x, dungeon.artesanoPos.y - player.y) <= TABERNA_NODE_INTERACT_RANGE);
+    }
+    function isNearHechicero() {
+        return !!(inTaberna && dungeon.hechiceroPos
+            && Math.hypot(dungeon.hechiceroPos.x - player.x, dungeon.hechiceroPos.y - player.y) <= TABERNA_NODE_INTERACT_RANGE);
+    }
 
     function handleWorldClick(x, y) {
         if (dead || isAnyPanelOpen()) return;
@@ -1164,16 +1324,40 @@
         // ataque, dejando al jugador sin poder golpear apenas un enemigo se
         // acercaba (bug corregido).
         if (!Combat.active) {
-            // -1) Taberna: ¿se hizo click sobre el Mercader? -> abre la
-            // ventana de comercio si está cerca.
+            // -1) Taberna: ¿se hizo click sobre el Mercader/Artesano/Hechicero?
+            // -> abre la ventana correspondiente si está cerca.
             if (inTaberna && dungeon.mercaderPos) {
                 const mp = dungeon.mercaderPos;
-                if (Math.hypot(mp.x - x, mp.y - y) <= MERCHANT_CLICK_RADIUS) {
-                    if (Math.hypot(mp.x - player.x, mp.y - player.y) > MERCHANT_INTERACT_RANGE) {
+                if (Math.hypot(mp.x - x, mp.y - y) <= TABERNA_NODE_CLICK_RADIUS) {
+                    if (Math.hypot(mp.x - player.x, mp.y - player.y) > TABERNA_NODE_INTERACT_RANGE) {
                         addFloatingText(mp.x, mp.y - 50, 'Muy lejos', '#ffd27a');
                         return;
                     }
                     UI.showShopPanel(player);
+                    return;
+                }
+            }
+            if (inTaberna && dungeon.artesanoPos) {
+                const ap = dungeon.artesanoPos;
+                if (Math.hypot(ap.x - x, ap.y - y) <= TABERNA_NODE_CLICK_RADIUS) {
+                    if (Math.hypot(ap.x - player.x, ap.y - player.y) > TABERNA_NODE_INTERACT_RANGE) {
+                        addFloatingText(ap.x, ap.y - 50, 'Muy lejos', '#ffd27a');
+                        return;
+                    }
+                    UI.renderCraft(player, true);
+                    UI.togglePanel('craft-panel');
+                    return;
+                }
+            }
+            if (inTaberna && dungeon.hechiceroPos) {
+                const hp2 = dungeon.hechiceroPos;
+                if (Math.hypot(hp2.x - x, hp2.y - y) <= TABERNA_NODE_CLICK_RADIUS) {
+                    if (Math.hypot(hp2.x - player.x, hp2.y - player.y) > TABERNA_NODE_INTERACT_RANGE) {
+                        addFloatingText(hp2.x, hp2.y - 50, 'Muy lejos', '#ffd27a');
+                        return;
+                    }
+                    UI.renderEnchantments(player, true);
+                    UI.togglePanel('enchant-panel');
                     return;
                 }
             }
@@ -1223,13 +1407,6 @@
         Combat.tryAttack(0, { x, y });
     }
 
-    // Click derecho: Ataque 2. Sin usos previos en este juego, así que se
-    // dedica entero al combate (preventDefault además evita el menú
-    // contextual del navegador).
-    function handleRightClick(x, y) {
-        if (dead || isAnyPanelOpen() || inTaberna) return;
-        Combat.tryAttack(1, { x, y });
-    }
 
     function update(dt) {
         if (dead || isAnyPanelOpen()) return;
@@ -1277,7 +1454,14 @@
 
         // Combate en tiempo real: persecución/ataques de enemigos, cooldowns,
         // carga del Ataque 3, efectos visuales activos (ver combat.js).
-        if (!inTaberna) Combat.updateRealtime(dt, enemies, player, dungeon);
+        if (!inTaberna) {
+            Combat.updateRealtime(dt, enemies, player, dungeon);
+            // Ataque 1 continuo (tecla "1" o click izquierdo mantenidos,
+            // ver bindInput): tryAttack ya no-opea sola si sigue en
+            // cooldown, así que llamarla cada frame reproduce "dispara
+            // apenas termina el cooldown, se repite mientras se mantenga".
+            if (attack1KeyHeld || attack1MouseHeld) Combat.tryAttack(0, lastAimWorldPos);
+        }
         checkPlayerDeath();
 
         nodes.forEach(n => n.update(dt));
@@ -1303,7 +1487,8 @@
         UI.updateHUD(player);
         UI.updateBossCounter(player, inTaberna, finalBossAlive);
         UI.updateFinalBossNotification(player, inTaberna);
-        UI.updateCombatHUD(player, inTaberna);
+        UI.updateCombatHUD(player, inTaberna, attack1KeyHeld || attack1MouseHeld);
+        UI.updateEffectsHUD(player);
         UI.showLevelToasts(player);
     }
 
@@ -1512,6 +1697,24 @@
             ctx.textAlign = 'center';
             ctx.fillText('Mercader', dungeon.mercaderPos.x, dungeon.mercaderPos.y + 46);
         }
+
+        // Artesano (crafteo, ver TABERNA_NODE_INTERACT_RANGE): a la derecha.
+        if (dungeon.artesanoPos) {
+            drawEntity(dungeon.artesanoPos.x, dungeon.artesanoPos.y, 32, '⚒️', '#c0c0c0');
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillStyle = '#ffe9b8';
+            ctx.textAlign = 'center';
+            ctx.fillText('Artesano', dungeon.artesanoPos.x, dungeon.artesanoPos.y + 46);
+        }
+
+        // Hechicero (encantamientos): a la izquierda.
+        if (dungeon.hechiceroPos) {
+            drawEntity(dungeon.hechiceroPos.x, dungeon.hechiceroPos.y, 32, '✨', '#b366ff');
+            ctx.font = 'bold 13px sans-serif';
+            ctx.fillStyle = '#ffe9b8';
+            ctx.textAlign = 'center';
+            ctx.fillText('Hechicero', dungeon.hechiceroPos.x, dungeon.hechiceroPos.y + 46);
+        }
     }
 
     function drawPortals() {
@@ -1563,6 +1766,7 @@
 
         drawPlayerEntity();
         Combat.renderEffects(ctx);
+        Combat.renderSkill2(ctx);
         drawChargeRing();
 
         ctx.font = 'bold 14px sans-serif';

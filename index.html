@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Forjadores del Reino — RPG de Armas</title>
-<link rel="stylesheet" href="styles.css?v=107">
+<link rel="stylesheet" href="styles.css?v=137">
 </head>
 <body>
 <div id="game-container">
@@ -33,6 +33,10 @@
             <span id="hud-arrows" class="hidden">🏹 20/20</span>
         </div>
     </div>
+
+    <!-- Efectos activos del jugador (bono de stacks de la habilidad toggle,
+         escudo, quemadura, etc.), debajo del recuadro de personaje. -->
+    <div id="effects-hud" class="hidden"></div>
 
     <!-- HUD abajo a la izquierda: piso y enemigos -->
     <div id="floor-hud">
@@ -191,20 +195,30 @@
     <div id="combat-hud">
         <div id="cooldown-row">
             <div class="cooldown-circle" id="cd-circle-0" style="--cd-pct:0deg">
-                <span class="cd-key">🖱️Izq</span>
+                <span class="cd-key">1 /🖱️Izq</span>
                 <span class="cd-timer" id="cd-timer-0">✓</span>
             </div>
             <div class="cooldown-circle" id="cd-circle-1" style="--cd-pct:0deg">
-                <span class="cd-key">🖱️Der</span>
+                <span class="cd-key">2</span>
                 <span class="cd-timer" id="cd-timer-1">✓</span>
             </div>
             <div class="cooldown-circle cooldown-circle-special" id="cd-circle-2" style="--cd-pct:0deg">
-                <span class="cd-key">R</span>
+                <span class="cd-key">3</span>
                 <span class="cd-timer" id="cd-timer-2">0/10</span>
             </div>
         </div>
         <div id="charge-bar-track"><div id="charge-bar-fill"></div></div>
         <div id="charge-bar-text">Cargas: 0/10</div>
+        <div id="skill2-status" class="hidden"></div>
+    </div>
+
+    <!-- Recordatorio de controles (ver SISTEMA DE CONTROLES): estático, no
+         requiere JS para actualizarse. -->
+    <div id="controls-hud">
+        <div>[1] / 🖱️Izq — Ataque 1 <span class="controls-hint">(mantener: continuo)</span></div>
+        <div>[2] — Ataque 2 <span class="controls-hint">(toggle)</span></div>
+        <div>[3] — Ataque 3 <span class="controls-hint">(10 cargas)</span></div>
+        <div>WASD — Movimiento</div>
     </div>
 
     <!-- Panel del enemigo vivo más cercano (ver updateCombatHUD en ui.js). -->
@@ -224,20 +238,20 @@
     <div id="teleport-fade" class="hidden"></div>
 </div>
 
-<script src="js/constants.js?v=107"></script>
-<script src="js/foods.js?v=107"></script>
-<script src="js/weapon-attacks.js?v=107"></script>
-<script src="js/floors.js?v=107"></script>
-<script src="js/grid-dungeon.js?v=107"></script>
-<script src="js/enchantments.js?v=107"></script>
-<script src="js/mounts.js?v=107"></script>
-<script src="js/shop.js?v=107"></script>
-<script src="js/weapons.js?v=107"></script>
-<script src="js/storage.js?v=107"></script>
-<script src="js/player.js?v=107"></script>
-<script src="js/enemy.js?v=107"></script>
-<script src="js/combat.js?v=107"></script>
-<script src="js/ui.js?v=107"></script>
-<script src="js/game.js?v=107"></script>
+<script src="js/constants.js?v=137"></script>
+<script src="js/foods.js?v=137"></script>
+<script src="js/weapon-attacks.js?v=137"></script>
+<script src="js/floors.js?v=137"></script>
+<script src="js/grid-dungeon.js?v=137"></script>
+<script src="js/enchantments.js?v=137"></script>
+<script src="js/mounts.js?v=137"></script>
+<script src="js/shop.js?v=137"></script>
+<script src="js/weapons.js?v=137"></script>
+<script src="js/storage.js?v=137"></script>
+<script src="js/player.js?v=137"></script>
+<script src="js/enemy.js?v=137"></script>
+<script src="js/combat.js?v=137"></script>
+<script src="js/ui.js?v=137"></script>
+<script src="js/game.js?v=137"></script>
 </body>
 </html>

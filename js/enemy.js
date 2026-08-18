@@ -7,6 +7,132 @@
 // ahora son real-time: expiresAt (timestamp) en vez de turnsLeft, y las
 // quemaduras/sangrados tickean 1 vez por segundo (ver tickStatusEffects).
 
+// ===== PATHFINDING (A*) =====
+// La especificación pedía generar una grilla de navegación nueva desde
+// cero (escaneando "paredes" como rectángulos). Este juego YA tiene una
+// grilla de tiles por piso (ver grid-dungeon.js: dungeon.tiles, un
+// Uint8Array de dungeon.cols×dungeon.rows a TILE_SIZE=40px, 1=caminable/
+// 0=pared, con dungeon.tileIndex(cx,cy) para indexar) — se reutiliza
+// DIRECTAMENTE esa grilla como grilla de navegación en vez de duplicarla.
+const PATHFINDING_MAX_ITERATIONS = 800; // tope de nodos expandidos por búsqueda: si se excede, fallback a línea recta (evita picos de frame en laberintos sin salida)
+
+function worldToTile(dungeon, x, y) {
+    return {
+        cx: Math.max(0, Math.min(dungeon.cols - 1, Math.floor(x / TILE_SIZE))),
+        cy: Math.max(0, Math.min(dungeon.rows - 1, Math.floor(y / TILE_SIZE))),
+    };
+}
+
+function isTileWalkable(dungeon, cx, cy) {
+    if (cx < 0 || cy < 0 || cx >= dungeon.cols || cy >= dungeon.rows) return false;
+    return dungeon.tiles[dungeon.tileIndex(cx, cy)] === 1;
+}
+
+// Distancia "octile" (heurística admisible para movimiento en 8 direcciones
+// con costo diagonal √2 — subestima o iguala el costo real, nunca lo supera).
+function pathHeuristic(a, b) {
+    const dx = Math.abs(a.cx - b.cx), dy = Math.abs(a.cy - b.cy);
+    return (dx + dy) + (Math.SQRT2 - 2) * Math.min(dx, dy);
+}
+
+const PATH_NEIGHBOR_OFFSETS = [
+    { dx: 0, dy: -1, cost: 1 }, { dx: 1, dy: 0, cost: 1 }, { dx: 0, dy: 1, cost: 1 }, { dx: -1, dy: 0, cost: 1 },
+    { dx: 1, dy: -1, cost: Math.SQRT2 }, { dx: 1, dy: 1, cost: Math.SQRT2 }, { dx: -1, dy: 1, cost: Math.SQRT2 }, { dx: -1, dy: -1, cost: Math.SQRT2 },
+];
+
+// A* simplificado sobre la grilla de tiles del piso. Devuelve una lista de
+// waypoints en píxeles (ya simplificada, ver simplifyPath) o null si no hay
+// camino / la búsqueda se volvió demasiado costosa (el llamador debe caer
+// de vuelta a movimiento en línea recta, ver Enemy.chaseTowardPlayer).
+function findPath(dungeon, startX, startY, targetX, targetY) {
+    const start = worldToTile(dungeon, startX, startY);
+    const goal = worldToTile(dungeon, targetX, targetY);
+    if (!isTileWalkable(dungeon, start.cx, start.cy) || !isTileWalkable(dungeon, goal.cx, goal.cy)) return null;
+    if (start.cx === goal.cx && start.cy === goal.cy) return [];
+
+    const key = (cx, cy) => cy * dungeon.cols + cx;
+    const gScore = new Map([[key(start.cx, start.cy), 0]]);
+    const fScore = new Map([[key(start.cx, start.cy), pathHeuristic(start, goal)]]);
+    const cameFrom = new Map();
+    const closed = new Set();
+    const open = [start];
+
+    let iterations = 0;
+    while (open.length > 0) {
+        if (++iterations > PATHFINDING_MAX_ITERATIONS) return null;
+
+        let bestIdx = 0, bestF = fScore.get(key(open[0].cx, open[0].cy));
+        for (let i = 1; i < open.length; i++) {
+            const f = fScore.get(key(open[i].cx, open[i].cy));
+            if (f < bestF) { bestF = f; bestIdx = i; }
+        }
+        const current = open.splice(bestIdx, 1)[0];
+        const currentKey = key(current.cx, current.cy);
+
+        if (current.cx === goal.cx && current.cy === goal.cy) {
+            return simplifyPath(dungeon, reconstructPath(cameFrom, current, key));
+        }
+        closed.add(currentKey);
+
+        for (const off of PATH_NEIGHBOR_OFFSETS) {
+            const ncx = current.cx + off.dx, ncy = current.cy + off.dy;
+            if (!isTileWalkable(dungeon, ncx, ncy)) continue;
+            // Evita "cortar esquinas" en diagonal atravesando el borde de una pared.
+            if (off.dx !== 0 && off.dy !== 0) {
+                if (!isTileWalkable(dungeon, current.cx + off.dx, current.cy) || !isTileWalkable(dungeon, current.cx, current.cy + off.dy)) continue;
+            }
+            const nKey = key(ncx, ncy);
+            if (closed.has(nKey)) continue;
+            const tentativeG = gScore.get(currentKey) + off.cost;
+            if (tentativeG < (gScore.has(nKey) ? gScore.get(nKey) : Infinity)) {
+                cameFrom.set(nKey, current);
+                gScore.set(nKey, tentativeG);
+                fScore.set(nKey, tentativeG + pathHeuristic({ cx: ncx, cy: ncy }, goal));
+                if (!open.some(n => n.cx === ncx && n.cy === ncy)) open.push({ cx: ncx, cy: ncy });
+            }
+        }
+    }
+    return null; // sin camino posible
+}
+
+function reconstructPath(cameFrom, endNode, key) {
+    const cells = [endNode];
+    let currentKey = key(endNode.cx, endNode.cy);
+    while (cameFrom.has(currentKey)) {
+        const prev = cameFrom.get(currentKey);
+        cells.unshift(prev);
+        currentKey = key(prev.cx, prev.cy);
+    }
+    return cells.map(c => ({ x: (c.cx + 0.5) * TILE_SIZE, y: (c.cy + 0.5) * TILE_SIZE }));
+}
+
+// "String pulling": si hay línea de vista directa entre dos waypoints no
+// adyacentes, se descartan los intermedios — evita el zigzag de seguir la
+// grilla al pie de la letra y deja un camino más suave/diagonal.
+function simplifyPath(dungeon, waypoints) {
+    if (waypoints.length <= 2) return waypoints;
+    const simplified = [waypoints[0]];
+    let anchor = 0;
+    for (let i = 1; i < waypoints.length - 1; i++) {
+        if (!hasLineOfSight(dungeon, waypoints[anchor], waypoints[i + 1])) {
+            simplified.push(waypoints[i]);
+            anchor = i;
+        }
+    }
+    simplified.push(waypoints[waypoints.length - 1]);
+    return simplified;
+}
+
+function hasLineOfSight(dungeon, a, b) {
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const steps = Math.max(1, Math.ceil(dist / (TILE_SIZE * 0.5)));
+    for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        if (!dungeon.isWalkable(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, 4)) return false;
+    }
+    return true;
+}
+
 class Enemy {
     constructor(typeDef, x, y) {
         this.type = typeDef;
@@ -37,6 +163,16 @@ class Enemy {
         // de ataques propios desde el último uso (reemplaza "turnos desde
         // el último uso"), y escudo temporal de daño reducido.
         this.abilityState = { attacksSinceUse: 0, shieldUntil: 0 };
+
+        // Pathfinding (ver findPath más arriba): waypoints en píxeles hacia
+        // el jugador, recalculados periódicamente (no cada frame). El
+        // intervalo lleva un jitter propio por enemigo (500-800ms) para que
+        // no todos recalculen en el mismo frame cuando hay muchos persiguiendo
+        // a la vez.
+        this.path = [];
+        this.pathIndex = 0;
+        this.lastPathAt = 0;
+        this.pathRecalcIntervalMs = 500 + Math.random() * 300;
     }
 
     // flatPenetration: reducción PLANA de defensa (ver estadística Destreza,
@@ -85,7 +221,10 @@ class Enemy {
 
     // Movimiento + estado de IA. No dispara el ataque en sí (eso lo hace
     // Combat.updateRealtime chequeando aiState==='attacking' y nextAttackAt).
-    update(dt, player, isWalkable) {
+    // Recibe el `dungeon` completo (no solo un callback isWalkable): el
+    // pathfinding necesita la grilla de tiles (dungeon.tiles/cols/rows), no
+    // solo un chequeo puntual de un punto.
+    update(dt, player, dungeon) {
         if (!this.alive) return;
         this.tickStatusEffects();
         if (!this.alive) return; // pudo morir por DoT en este mismo frame
@@ -100,24 +239,71 @@ class Enemy {
 
         if (dist > ENEMY_LEASH_RANGE) {
             this.aiState = 'idle';
+            this.path = [];
             return;
         }
-        if (dist <= ENEMY_ATTACK_RANGE) {
+        // Alcance de ataque propio del tipo (70-100px, cada uno distinto;
+        // Jefe Final 150px fijo — ver ENEMY_TYPES/spawnFinalBossEntity),
+        // con ENEMY_ATTACK_RANGE como respaldo si algún tipo no lo define.
+        if (dist <= (this.type.attackRange || ENEMY_ATTACK_RANGE)) {
             this.aiState = 'attacking';
+            this.path = [];
             return;
         }
         if (dist <= ENEMY_VISUAL_RANGE || this.aiState === 'chasing' || this.aiState === 'attacking') {
             this.aiState = 'chasing';
-            const dirX = player.x - this.x, dirY = player.y - this.y;
-            const len = Math.hypot(dirX, dirY) || 1;
-            const step = this.speed * (dt / 16);
-            const nx = this.x + (dirX / len) * step;
-            const ny = this.y + (dirY / len) * step;
-            if (!isWalkable || isWalkable(nx, this.y, this.radius)) this.x = nx;
-            if (!isWalkable || isWalkable(this.x, ny, this.radius)) this.y = ny;
+            this.chaseTowardPlayer(dt, player, dungeon, now);
         } else {
             this.aiState = 'idle';
+            this.path = [];
         }
+    }
+
+    // Sigue los waypoints de `this.path` (ver findPath) en vez de caminar
+    // en línea recta hacia el jugador — evita que se quede empujando contra
+    // una pared cuando el jugador está detrás de un obstáculo. El camino se
+    // recalcula cada `pathRecalcIntervalMs` (no cada frame, ver constructor);
+    // sin `dungeon` (no debería pasar en juego real, solo defensivo) o sin
+    // camino encontrado, cae de vuelta al movimiento directo de antes.
+    chaseTowardPlayer(dt, player, dungeon, now) {
+        if (!dungeon) {
+            this.stepToward(player.x, player.y, dt, null);
+            return;
+        }
+
+        if (now - this.lastPathAt >= this.pathRecalcIntervalMs) {
+            this.lastPathAt = now;
+            const newPath = findPath(dungeon, this.x, this.y, player.x, player.y);
+            this.path = newPath || [];
+            this.pathIndex = 0;
+        }
+
+        let targetX = player.x, targetY = player.y;
+        if (this.path.length > 0) {
+            while (this.pathIndex < this.path.length && Math.hypot(this.path[this.pathIndex].x - this.x, this.path[this.pathIndex].y - this.y) < TILE_SIZE * 0.5) {
+                this.pathIndex++;
+            }
+            if (this.pathIndex < this.path.length) {
+                targetX = this.path[this.pathIndex].x;
+                targetY = this.path[this.pathIndex].y;
+            }
+            // Si ya se consumieron todos los waypoints, sigue directo al
+            // jugador para el último tramo (targetX/Y ya quedaron así arriba).
+        }
+        this.stepToward(targetX, targetY, dt, dungeon);
+    }
+
+    // Un paso de movimiento hacia (targetX,targetY), con el mismo
+    // "wall-slide" de siempre como red de seguridad (permite deslizar por
+    // un eje aunque el otro esté bloqueado) incluso siguiendo un waypoint.
+    stepToward(targetX, targetY, dt, dungeon) {
+        const dirX = targetX - this.x, dirY = targetY - this.y;
+        const len = Math.hypot(dirX, dirY) || 1;
+        const step = this.speed * (dt / 16);
+        const nx = this.x + (dirX / len) * step;
+        const ny = this.y + (dirY / len) * step;
+        if (!dungeon || dungeon.isWalkable(nx, this.y, this.radius)) this.x = nx;
+        if (!dungeon || dungeon.isWalkable(this.x, ny, this.radius)) this.y = ny;
     }
 }
 

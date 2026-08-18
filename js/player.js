@@ -534,7 +534,11 @@ class Player {
 
     getEffectiveSpeed() {
         const mount = this.getEquippedMount();
-        return this.baseSpeed * (1 + (mount ? mount.speedPercent : 0) / 100);
+        // Pícaro/Arquero: +velocidad% por stack de su habilidad toggle
+        // activa (ver RT_TOGGLE_SKILLS.speedPctPerStack/speedPctMax en
+        // constants.js) — 0 si no aplica.
+        const skillSpeedBonus = Combat.getSkill2SpeedBonusPercent(this.activeProfession);
+        return this.baseSpeed * (1 + (mount ? mount.speedPercent : 0) / 100) * (1 + skillSpeedBonus);
     }
 
     // ----- BANCO DE NÚCLEOS (craftear/descraftear rareza, mismo Tier) -----
@@ -812,7 +816,11 @@ class Player {
     takeDamage(amount) {
         let dmg = amount;
         const armor = this.getArmorInfo();
-        dmg = Math.max(1, dmg - armor.defense * 0.15);
+        // Tanque: +mitigación% por stack de su habilidad toggle activa (ver
+        // RT_TOGGLE_SKILLS.defPctPerStack/defPctMax en constants.js) — 0 si
+        // no aplica; multiplica la defensa EFECTIVA usada en la reducción.
+        const skillDefBonus = Combat.getSkill2DefenseBonusPercent(this.activeProfession);
+        dmg = Math.max(1, dmg - armor.defense * (1 + skillDefBonus) * 0.15);
 
         // Reducción de daño de encantamientos (ej. Fortaleza Marcial,
         // Reparación Divina nivel 3 — ver enchantments.js).

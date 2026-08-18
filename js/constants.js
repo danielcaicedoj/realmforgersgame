@@ -50,7 +50,7 @@ const SPAWN_ZONE_PLAYER_COLOR = '#d63cff';
 // Nodos que no reaparecen: hay que vencer varios enemigos cerca para
 // desbloquearlos, y después se abren con una carga corta (como recolectar).
 const CHESTS_PER_FLOOR = 5;
-const CHEST_ZONE_RADIUS = 250; // "cerca" del cofre: enemigos guardianes + conteo de progreso
+const CHEST_ZONE_RADIUS = 750; // "cerca" del cofre: enemigos guardianes + conteo de progreso (triplicado a pedido)
 const CHEST_INTERACT_RANGE = 90;
 const CHEST_OPEN_TIME = 1000; // 1 segundo, igual que recolectar por ahora (GATHER_TIME)
 
@@ -247,7 +247,7 @@ const TIERS = [
 // la "decoración" (props/estructuras únicas) NO se implementa — requeriría
 // un sistema nuevo de colocación de props que este juego no tiene.
 const BIOME_THEMES = [
-    { tierId: 1,  bioma: 'Cavernas de Bronce',      terreno: 'Piedra parda y tierra',       iluminacion: 'Antorchas cálidas y tenues', wallColor: '#2b1f14', floorColor: '#3a2a1a', ambientTint: 'rgba(205,127,50,0.05)' },
+    { tierId: 1,  bioma: 'Cavernas de Bronce',      terreno: 'Piedra parda y tierra',       iluminacion: 'Antorchas cálidas y tenues', wallColor: '#2b1f14', floorColor: '#3E5927', ambientTint: 'rgba(205,127,50,0.05)' },
     { tierId: 2,  bioma: 'Minas de Hierro',         terreno: 'Roca gris y vetas metálicas',  iluminacion: 'Luz fría de faroles',        wallColor: '#24262b', floorColor: '#33363d', ambientTint: 'rgba(192,192,192,0.05)' },
     { tierId: 3,  bioma: 'Fortaleza de Acero',      terreno: 'Losas de acero pulido',        iluminacion: 'Luz industrial azulada',     wallColor: '#1f2225', floorColor: '#2c3034', ambientTint: 'rgba(113,121,126,0.05)' },
     { tierId: 4,  bioma: 'Abismo Infernal',         terreno: 'Roca volcánica y ceniza',      iluminacion: 'Resplandor rojizo de lava',  wallColor: '#2a0f08', floorColor: '#451708', ambientTint: 'rgba(255,90,31,0.08)' },
@@ -414,43 +414,51 @@ const BOW_NAMES = {
 // ya la usan los efectos de "reducir/ignorar defensa" cuando se agreguen valores).
 // hp/dmg/xp son valores base para PISO 1; enemy-scaling.js los escala según
 // el piso actual con la fórmula dada por el usuario.
+// `dmg`: reescalado para que el piso 1 (Esqueleto/Zombie/Goblin/Lobo) caiga
+// en el rango pedido (15-20 de daño); el resto de los pisos se escaló por
+// el MISMO factor (~2.45x) para preservar la curva de progresión original
+// sin crear un salto hacia abajo al cruzar de un pool al siguiente (ver
+// getScaledEnemyStats en floors.js, que sigue aplicando +10%/piso encima de
+// esto). `attackRange`: alcance de ataque cuerpo a cuerpo propio de cada
+// tipo (70-100px, todos distintos, ver Enemy.update en enemy.js) — el Jefe
+// Final tiene su propio rango fijo de 150px (ver spawnFinalBossEntity).
 const ENEMY_TYPES = [
     // --- Piso 1-10 ---
-    { id: 'esqueleto', name: 'Esqueleto', emoji: '💀', hp: 30, dmg: 8, xp: 12, color: '#d8d3c0', radius: 16, defense: 0 },
-    { id: 'zombie', name: 'Zombie', emoji: '🧟', hp: 38, dmg: 7, xp: 12, color: '#5a7a4a', radius: 17, defense: 0 },
-    { id: 'goblin', name: 'Goblin', emoji: '👺', hp: 24, dmg: 9, xp: 11, color: '#6a8a3a', radius: 15, defense: 0 },
-    { id: 'lobo', name: 'Lobo', emoji: '🐺', hp: 22, dmg: 5, xp: 8, color: '#8b6f47', radius: 16, defense: 0 },
+    { id: 'esqueleto', name: 'Esqueleto', emoji: '💀', hp: 30, dmg: 19, xp: 12, color: '#d8d3c0', radius: 16, defense: 0, attackRange: 80 },
+    { id: 'zombie', name: 'Zombie', emoji: '🧟', hp: 38, dmg: 17, xp: 12, color: '#5a7a4a', radius: 17, defense: 0, attackRange: 75 },
+    { id: 'goblin', name: 'Goblin', emoji: '👺', hp: 24, dmg: 20, xp: 11, color: '#6a8a3a', radius: 15, defense: 0, attackRange: 90 },
+    { id: 'lobo', name: 'Lobo', emoji: '🐺', hp: 22, dmg: 15, xp: 8, color: '#8b6f47', radius: 16, defense: 0, attackRange: 95 },
 
     // --- Piso 11-20 ---
-    { id: 'vampiro', name: 'Vampiro', emoji: '🧛', hp: 50, dmg: 12, xp: 25, color: '#7a1f3d', radius: 17, defense: 0 },
-    { id: 'troll', name: 'Troll', emoji: '👹', hp: 75, dmg: 16, xp: 30, color: '#3d6b2f', radius: 22, defense: 0 },
-    { id: 'fantasma', name: 'Fantasma', emoji: '👻', hp: 28, dmg: 11, xp: 20, color: '#c9c9e8', radius: 16, defense: 0 },
+    { id: 'vampiro', name: 'Vampiro', emoji: '🧛', hp: 50, dmg: 29, xp: 25, color: '#7a1f3d', radius: 17, defense: 0, attackRange: 85 },
+    { id: 'troll', name: 'Troll', emoji: '👹', hp: 75, dmg: 39, xp: 30, color: '#3d6b2f', radius: 22, defense: 0, attackRange: 70 },
+    { id: 'fantasma', name: 'Fantasma', emoji: '👻', hp: 28, dmg: 27, xp: 20, color: '#c9c9e8', radius: 16, defense: 0, attackRange: 100 },
 
     // --- Piso 21-30 ---
-    { id: 'demonio', name: 'Demonio', emoji: '😈', hp: 140, dmg: 26, xp: 55, color: '#8a1f1f', radius: 19, defense: 0 },
-    { id: 'hombre_lobo', name: 'Hombre Lobo', emoji: '🐗', hp: 120, dmg: 30, xp: 55, color: '#5a4a3a', radius: 20, defense: 0 },
-    { id: 'sombra', name: 'Sombra', emoji: '🌑', hp: 100, dmg: 28, xp: 50, color: '#2a1a3a', radius: 17, defense: 0 },
+    { id: 'demonio', name: 'Demonio', emoji: '😈', hp: 140, dmg: 64, xp: 55, color: '#8a1f1f', radius: 19, defense: 0, attackRange: 78 },
+    { id: 'hombre_lobo', name: 'Hombre Lobo', emoji: '🐗', hp: 120, dmg: 73, xp: 55, color: '#5a4a3a', radius: 20, defense: 0, attackRange: 92 },
+    { id: 'sombra', name: 'Sombra', emoji: '🌑', hp: 100, dmg: 69, xp: 50, color: '#2a1a3a', radius: 17, defense: 0, attackRange: 83 },
 
     // --- Piso 31-50 ---
-    { id: 'lich', name: 'Lich', emoji: '🧙', hp: 220, dmg: 40, xp: 90, color: '#3a2f5a', radius: 19, defense: 0 },
-    { id: 'espectro', name: 'Espectro', emoji: '🌫️', hp: 190, dmg: 42, xp: 85, color: '#8a9ac9', radius: 17, defense: 0 },
-    { id: 'wyvern', name: 'Wyvern', emoji: '🐲', hp: 260, dmg: 38, xp: 95, color: '#2f6b4a', radius: 23, defense: 0 },
+    { id: 'lich', name: 'Lich', emoji: '🧙', hp: 220, dmg: 98, xp: 90, color: '#3a2f5a', radius: 19, defense: 0, attackRange: 97 },
+    { id: 'espectro', name: 'Espectro', emoji: '🌫️', hp: 190, dmg: 103, xp: 85, color: '#8a9ac9', radius: 17, defense: 0, attackRange: 88 },
+    { id: 'wyvern', name: 'Wyvern', emoji: '🐲', hp: 260, dmg: 93, xp: 95, color: '#2f6b4a', radius: 23, defense: 0, attackRange: 73 },
 
     // --- Piso 51-100 ---
-    { id: 'archilich', name: 'Archilich', emoji: '☠️', hp: 450, dmg: 70, xp: 180, color: '#4a1f6a', radius: 20, defense: 0 },
-    { id: 'entidad_vacio', name: 'Entidad del Vacío', emoji: '🕳️', hp: 420, dmg: 75, xp: 190, color: '#0a0a1a', radius: 19, defense: 0 },
-    { id: 'leviatan', name: 'Leviatán', emoji: '🐋', hp: 600, dmg: 65, xp: 200, color: '#1a4a6a', radius: 26, defense: 0 },
+    { id: 'archilich', name: 'Archilich', emoji: '☠️', hp: 450, dmg: 171, xp: 180, color: '#4a1f6a', radius: 20, defense: 0, attackRange: 81 },
+    { id: 'entidad_vacio', name: 'Entidad del Vacío', emoji: '🕳️', hp: 420, dmg: 184, xp: 190, color: '#0a0a1a', radius: 19, defense: 0, attackRange: 94 },
+    { id: 'leviatan', name: 'Leviatán', emoji: '🐋', hp: 600, dmg: 159, xp: 200, color: '#1a4a6a', radius: 26, defense: 0, attackRange: 76 },
 
     // --- Piso 101-200 ---
-    { id: 'dragon_antiguo', name: 'Dragón Antiguo', emoji: '🐉', hp: 900, dmg: 130, xp: 400, color: '#6a1f1f', radius: 27, defense: 0 },
-    { id: 'elemental_caos', name: 'Elemental del Caos', emoji: '🌀', hp: 850, dmg: 140, xp: 420, color: '#8a2f8a', radius: 21, defense: 0 },
-    { id: 'abominacion', name: 'Abominación', emoji: '🧟‍♂️', hp: 1000, dmg: 120, xp: 410, color: '#4a5a2a', radius: 24, defense: 0 },
+    { id: 'dragon_antiguo', name: 'Dragón Antiguo', emoji: '🐉', hp: 900, dmg: 318, xp: 400, color: '#6a1f1f', radius: 27, defense: 0, attackRange: 89 },
+    { id: 'elemental_caos', name: 'Elemental del Caos', emoji: '🌀', hp: 850, dmg: 343, xp: 420, color: '#8a2f8a', radius: 21, defense: 0, attackRange: 72 },
+    { id: 'abominacion', name: 'Abominación', emoji: '🧟‍♂️', hp: 1000, dmg: 294, xp: 410, color: '#4a5a2a', radius: 24, defense: 0, attackRange: 99 },
 
     // --- Piso 201-1000 (entidades cósmicas) ---
-    { id: 'heraldo_cosmico', name: 'Heraldo Cósmico', emoji: '✨', hp: 1600, dmg: 220, xp: 800, color: '#2a2a6a', radius: 22, defense: 0 },
-    { id: 'devorador_estrellas', name: 'Devorador de Estrellas', emoji: '🌠', hp: 1700, dmg: 230, xp: 820, color: '#1a1a3a', radius: 23, defense: 0 },
-    { id: 'guardian_vacio', name: 'Guardián del Vacío', emoji: '🌌', hp: 1650, dmg: 210, xp: 810, color: '#0a0a2a', radius: 24, defense: 0 },
-    { id: 'entidad_primordial', name: 'Entidad Primordial', emoji: '🔮', hp: 1800, dmg: 240, xp: 850, color: '#4a1a4a', radius: 25, defense: 0 },
+    { id: 'heraldo_cosmico', name: 'Heraldo Cósmico', emoji: '✨', hp: 1600, dmg: 539, xp: 800, color: '#2a2a6a', radius: 22, defense: 0, attackRange: 84 },
+    { id: 'devorador_estrellas', name: 'Devorador de Estrellas', emoji: '🌠', hp: 1700, dmg: 563, xp: 820, color: '#1a1a3a', radius: 23, defense: 0, attackRange: 77 },
+    { id: 'guardian_vacio', name: 'Guardián del Vacío', emoji: '🌌', hp: 1650, dmg: 514, xp: 810, color: '#0a0a2a', radius: 24, defense: 0, attackRange: 96 },
+    { id: 'entidad_primordial', name: 'Entidad Primordial', emoji: '🔮', hp: 1800, dmg: 588, xp: 850, color: '#4a1a4a', radius: 25, defense: 0, attackRange: 71 },
 ];
 
 function getEnemyType(id) { return ENEMY_TYPES.find(e => e.id === id); }
@@ -458,13 +466,15 @@ function getEnemyType(id) { return ENEMY_TYPES.find(e => e.id === id); }
 // ----- RAREZA DE MONSTRUOS (6 niveles) -----
 // Se sortea una vez por enemigo al generarlo (ver loadFloor en game.js).
 // Cada nivel es 10% más fuerte (hp/dmg) que el anterior, en cadena (1.10^n).
+// `attackIntervalMs`: cada cuánto ataca (ver Combat.updateRealtime) — NO
+// depende del nivel/piso, solo de la rareza (a mayor rareza, más rápido).
 const MONSTER_RARITIES = [
-    { id: 'comun',       name: 'Común',       color: '#9a9a9a', chance: 50,  mult: 1 },
-    { id: 'poco_comun',  name: 'Poco Común',  color: '#3ecf5e', chance: 30,  mult: 1.1 },
-    { id: 'raro',        name: 'Raro',        color: '#3f9dff', chance: 13,  mult: 1.1 ** 2 },
-    { id: 'epico',       name: 'Épico',       color: '#a64fff', chance: 5,   mult: 1.1 ** 3 },
-    { id: 'legendario',  name: 'Legendario',  color: '#ffcf3f', chance: 1.5, mult: 1.1 ** 4 },
-    { id: 'mitico',      name: 'Mítico',      color: '#e93cff', chance: 0.5, mult: 1.1 ** 5 },
+    { id: 'comun',       name: 'Común',       color: '#9a9a9a', chance: 50,  mult: 1,             attackIntervalMs: 1000 },
+    { id: 'poco_comun',  name: 'Poco Común',  color: '#3ecf5e', chance: 30,  mult: 1.1,           attackIntervalMs: 900 },
+    { id: 'raro',        name: 'Raro',        color: '#3f9dff', chance: 13,  mult: 1.1 ** 2,      attackIntervalMs: 800 },
+    { id: 'epico',       name: 'Épico',       color: '#a64fff', chance: 5,   mult: 1.1 ** 3,      attackIntervalMs: 700 },
+    { id: 'legendario',  name: 'Legendario',  color: '#ffcf3f', chance: 1.5, mult: 1.1 ** 4,      attackIntervalMs: 600 },
+    { id: 'mitico',      name: 'Mítico',      color: '#e93cff', chance: 0.5, mult: 1.1 ** 5,      attackIntervalMs: 500 },
 ];
 
 function rollMonsterRarity() {
@@ -480,13 +490,19 @@ function rollMonsterRarity() {
 function getMonsterRarity(id) { return MONSTER_RARITIES.find(r => r.id === id) || MONSTER_RARITIES[0]; }
 
 // ----- JEFES DINÁMICOS (aparecen al matar enemigos, no al generar el piso) -----
-// mult: multiplicador de hp/dmg sobre el enemigo base ya escalado al piso.
+// mult: multiplicador de HP/XP sobre el enemigo base ya escalado al piso.
+// dmgMult: multiplicador de DAÑO — separado de `mult` a propósito (antes
+// compartían el mismo número, lo que disparaba el daño de piso 1 muy por
+// encima del objetivo pedido: ~200 de daño en vez de 60-70). Calibrado
+// junto con los nuevos valores base de ENEMY_TYPES para que, en el piso 1:
+// minijefe caiga ~25-30, jefe ~30-40, jefe final ~60-70 (ver
+// spawnDynamicBoss/spawnFinalBossEntity en game.js).
 // radiusMult: qué tan grande es el círculo respecto a un enemigo normal.
 // chance: probabilidad de aparecer cada vez que se elimina 1 enemigo (minijefe/jefe).
 const BOSS_TIERS = {
-    minijefe:   { label: 'Minijefe',           rarities: ['poco_comun', 'raro'], mult: 2,  chance: 0.20, radiusMult: 1.5 },
-    jefe:       { label: 'Jefe',               rarities: ['epico', 'legendario'], mult: 4,  chance: 0.10, radiusMult: 2 },
-    jefe_final: { label: 'Jefe Final',          rarities: ['mitico'],              mult: 10, radiusMult: 3 },
+    minijefe:   { label: 'Minijefe',           rarities: ['poco_comun', 'raro'], mult: 2,  dmgMult: 1.6, chance: 0.20, radiusMult: 1.5 },
+    jefe:       { label: 'Jefe',               rarities: ['epico', 'legendario'], mult: 4,  dmgMult: 2.0, chance: 0.10, radiusMult: 2 },
+    jefe_final: { label: 'Jefe Final',          rarities: ['mitico'],              mult: 10, dmgMult: 7.5, radiusMult: 3 },
 };
 
 // ----- JEFE FINAL: sistema de puntos (desbloqueo) -----
@@ -691,21 +707,71 @@ const RT_CHARGE_MAX = 10;
 const RT_CLASS_CHARGE_MAX = 3;
 const RT_ENGAGE_GROUP_RADIUS = 90; // enemigos cercanos al que muere, para el multiplicador de loot por grupo
 
-// Cooldown escalable con el nivel del arma/jugador: mismo valor base para
-// todas las clases (Ataque1=1s, Ataque2=2s, Ataque3 solo requiere cargas,
-// sin cooldown de tiempo), reducido progresivamente entre nivel 1 (factor
-// 1.0) y nivel MAX_LEVEL (factor 0.1, i.e. -90%).
+// Cooldown escalable con el nivel del arma/jugador — SOLO aplica al Ataque 1
+// (el Ataque 2 ya no es un ataque con cooldown propio, ver RT_TOGGLE_SKILLS
+// más abajo; el Ataque 3 no tiene cooldown de tiempo, solo requiere cargas).
+// Base por clase (antes era uniforme para todas), reducido progresivamente
+// entre nivel 1 (factor 1.0) y nivel MAX_LEVEL (factor 0.1, i.e. -90%).
 //   ProgresionGlobal = (nivel - 1) / (MAX_LEVEL - 1)      -> 0 en nivel 1, 1 en nivel MAX_LEVEL
 //   CooldownFinal = Base × [0.1 + 0.9 × (1 - ProgresionGlobal)]
-const RT_ATTACK_BASE_COOLDOWN_MS = [1000, 2000, 0];
+const RT_ATTACK1_BASE_COOLDOWN_MS = {
+    guerrero: 1000, picaro: 1500, barbaro: 1000, arquero: 1500, mago: 1000, tanque: 1000, desarmado: 1000,
+};
 function getAttackCooldownMs(profId, slot, level) {
-    const base = RT_ATTACK_BASE_COOLDOWN_MS[slot];
-    if (!base) return 0; // Ataque 3: sin cooldown base
+    if (slot !== 0) return 0; // Ataque2: toggle (RT_TOGGLE_SKILLS); Ataque3: sin cooldown base
+    const base = RT_ATTACK1_BASE_COOLDOWN_MS[profId] || 1000;
     const lvl = Math.min(Math.max(level || 1, 1), MAX_LEVEL);
     const progresionGlobal = (lvl - 1) / (MAX_LEVEL - 1);
     const factor = 0.1 + 0.9 * (1 - progresionGlobal);
     return base * factor;
 }
+
+// ----- ATAQUE 2: HABILIDADES TOGGLE (objetos orbitales/círculo) -----
+// El Ataque 2 dejó de ser un ataque de un solo golpe: la tecla "2" ahora
+// ACTIVA/DESACTIVA (toggle) una habilidad pasiva por clase que inflige daño
+// automáticamente a los enemigos dentro de `radius` cada `tickMs` (propio de
+// cada clase), con su propio `dmgBase` escalado por arma/rareza (mismo
+// patrón que cualquier otro ataque — ver Combat.tickToggleSkill). Al activar
+// se aplica `activateCooldownMs`; al
+// desactivar (o cambiar de clase activa) se pierden los stacks.
+// Stacks (0-`RT_TOGGLE_STACK_MAX`): +1 por CADA enemigo muerto mientras está
+// activa (sin importar qué lo mató). Los campos `*PerStack`/`*Max` definen
+// el bono por stack de cada clase (ver Combat.getSkill2*BonusPercent):
+//   dmgPct        -> % de daño extra en TODOS los ataques de esa clase (Guerrero/Mago)
+//   speedPct      -> % de velocidad de movimiento extra (Pícaro/Arquero)
+//   cdMs          -> reducción fija (ms) del cooldown del Ataque 1 (Pícaro/Arquero)
+//   lifestealPct  -> % de robo de vida extra (Bárbaro) — cura, NO aumenta el daño
+//   defPct        -> % extra de mitigación de armadura (Tanque)
+// La geometría/visual del viejo Ataque2 en RT_ATTACK_GEOMETRY (slot 1) ya NO
+// se usa para nada (ni daño ni dibujo) — se deja sin tocar, es dato muerto.
+//
+// `dmgBase`/`tickMs`: daño del pulso automático y cada cuánto se dispara —
+// PROPIOS de la habilidad toggle, ya NO se leen de weaponAttacks.basic[1]
+// (que ahora es dato muerto por completo, ni geometría ni daño). Escala con
+// el arma igual que el resto de los ataques: dmgEfectivo = dmgBase ×
+// tier.mult × rareza.mult (ver Combat.tickToggleSkill), mismo patrón que el
+// arma automática por nivel (getWeaponForLevel). Objetivo a Tier 1 (daño
+// por segundo, calibrado explícitamente por el usuario):
+//   Pícaro 3 c/500ms=6dps · Guerrero 7 c/1000ms=7dps · Bárbaro 4 c/1000ms=4dps
+//   Tanque 4 c/1000ms=4dps · Mago 3 c/500ms=6dps · Arquero 3 c/500ms=6dps
+const RT_TOGGLE_STACK_MAX = 10;
+// `radius` = radio BASE del círculo exterior (línea/borde) alrededor del
+// jugador: es tanto el alcance del pulso de daño automático como el radio
+// donde se DIBUJAN los objetos orbitales/círculo (mismo círculo, sin un
+// radio "visual" aparte — ver Combat.renderSkill2). El radio EFECTIVO real
+// escala con el arma equipada — ver Combat.getSkill2EffectiveRadius:
+// +3% por Tier (Bronce=+0% .. Absoluto=+27%) y +3% por nivel de rareza
+// (Común=+0% .. Mítico=+15%), aditivos entre sí. `orbitMs` es el período
+// de rotación — ahora TODAS las clases giran (antes Mago/Arquero quedaban
+// fijos; se les dio la misma velocidad que Pícaro, ~2s por vuelta).
+const RT_TOGGLE_SKILLS = {
+    guerrero: { name: 'Espadas Orbitales', emoji: '⚔️', objectCount: 5, radius: 200, orbitMs: 3000, activateCooldownMs: 2500, color: '#ffd700', dmgBase: 7, tickMs: 1000, dmgPctPerStack: 0.02, dmgPctMax: 0.20 },
+    picaro:   { name: 'Dagas Orbitales', emoji: '🗡️', objectCount: 6, radius: 180, orbitMs: 2000, activateCooldownMs: 2500, color: '#d0d0e8', dmgBase: 3, tickMs: 500, speedPctPerStack: 0.02, speedPctMax: 0.20, cdMsPerStack: 100, cdMsMax: 1000 },
+    barbaro:  { name: 'Hachas Orbitales', emoji: '🪓', objectCount: 5, radius: 150, orbitMs: 3500, activateCooldownMs: 3000, color: '#8b0000', dmgBase: 4, tickMs: 1000, lifestealPctPerStack: 0.015, lifestealPctMax: 0.15 },
+    arquero:  { name: 'Círculo de Flechas', emoji: '🏹', objectCount: 8, radius: 250, orbitMs: 2000, activateCooldownMs: 2000, color: '#228b22', dmgBase: 3, tickMs: 500, speedPctPerStack: 0.02, speedPctMax: 0.20, cdMsPerStack: 100, cdMsMax: 1000 },
+    mago:     { name: 'Círculo de Runas', emoji: '🧙', objectCount: 6, radius: 250, orbitMs: 2000, activateCooldownMs: 2500, color: '#00ffff', dmgBase: 3, tickMs: 500, dmgPctPerStack: 0.02, dmgPctMax: 0.20 },
+    tanque:   { name: 'Círculo de Escudos', emoji: '🔨', objectCount: 6, radius: 180, orbitMs: 4000, activateCooldownMs: 3000, color: '#4169e1', dmgBase: 4, tickMs: 1000, defPctPerStack: 0.05, defPctMax: 0.50 },
+};
 
 // Geometría/visual por profesión y slot. Cada entrada separa la FORMA DE
 // IMPACTO (hitShape: qué enemigos son alcanzados) del ESTILO VISUAL
@@ -715,51 +781,66 @@ function getAttackCooldownMs(profId, slot, level) {
 //   hitShape 'circle'       -> getEnemiesInCircle(range) centrado en el jugador
 //   hitShape 'offsetCircle' -> getEnemiesInCircle(range) centrado a offsetRange
 //                               px por delante del jugador en la dirección de aim
-//   visual 'cone'    -> relleno translúcido tipo cono (look original, solo Mago)
-//   visual 'slash'   -> arco/línea tipo "corte" (cuerpo a cuerpo rediseñado)
-//   visual 'arrow'   -> flecha recta (Arquero A1/A3)
-//   visual 'arrowRain' -> lluvia de flechas cayendo sobre un área (Arquero A2)
-//   visual 'circle'  -> círculo expandible centrado en el jugador (Ataque 3)
-// `startRange`/`duration` parametrizan la expansión del círculo especial;
-// Mago conserva sus valores viejos (startRange:160, duration:400) para no
-// alterar su visual, que la especificación pide dejar sin cambios.
+//   visual 'cone'    -> relleno translúcido tipo cono (Mago y, desde este
+//                        rediseño, TODAS las clases cuerpo a cuerpo — ver abajo)
+//   visual 'coneArrows' -> igual que 'cone' + un abanico de flechas cortas
+//                        dentro del arco (Arquero: lo distingue del Mago)
+//   visual 'slash'   -> arco/línea tipo "corte", radio ~fijo con barrido angular
+//                        (sin uso actual desde el rediseño de ondas/conos)
+//   visual 'wave'    -> onda(s) expansiva(s) en abanico, con daño multiplicado
+//                        por solape (sin uso actual: el Ataque 1 volvió a ser
+//                        un cono único, ver RESUMEN DE CAMBIOS VISUALES; se
+//                        deja implementado por si se reutiliza más adelante)
+//   visual 'arrowRain' -> lluvia de flechas cayendo sobre un área (Arquero A2,
+//                        dato sin uso: el Ataque 2 es ahora un toggle, ver
+//                        RT_TOGGLE_SKILLS)
+//   visual 'circle'  -> círculo expandible centrado en el jugador (Ataque 3,
+//                        UNIFICADO: misma mecánica para las 6 clases, solo
+//                        cambian radio/duración/color por clase)
+// `startRange`/`duration` parametrizan la expansión del círculo especial.
+// Ningún ataque emite partículas viajeras (ver spawnAttackEffect): solo el
+// destello de impacto en cada golpe (spawnImpactFlash), que sí se conserva.
+// Las entradas [1] (Ataque 2) de todas las clases son dato muerto: el
+// Ataque 2 real es la habilidad toggle (RT_TOGGLE_SKILLS), no lee esta tabla.
 // El nombre real de cada tier (weapon-attacks.js) se sigue usando en el
 // texto flotante/log.
+const RT_WAVE_FAN_OFFSETS = [-45, 0, 45]; // legado del abanico de triple onda (ver 'wave' arriba, sin uso actual)
+const RT_WAVE_STAGGER_MS = 50;
 const RT_ATTACK_GEOMETRY = {
-    picaro: [ // 🗡️ slash blanco, rápido y preciso
-        { hitShape: 'cone', visual: 'slash', range: 150, angle: 45, duration: 120, particleCount: 4, color: '#ffffff', particleColor: '#f2f2f2' },
-        { hitShape: 'cone', visual: 'slash', range: 200, angle: 60, duration: 200, particleCount: 8, color: '#ffffff', particleColor: '#f2f2f2' },
-        { hitShape: 'circle', visual: 'circle', range: 300, startRange: 50, duration: 500, particleCount: 20, color: '#ffffff', particleColor: '#f2f2f2' },
+    picaro: [ // 🗡️ Plateado/gris claro
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 75, duration: 350, color: '#d0d0e8' },
+        { hitShape: 'cone', visual: 'wave', range: 200, angle: 60, startRange: 40, duration: 400, lineWidth: 3, waveOffsets: RT_WAVE_FAN_OFFSETS, color: '#d0d0e8' },
+        { hitShape: 'circle', visual: 'circle', range: 300, startRange: 50, duration: 500, color: '#d0d0e8' },
     ],
-    guerrero: [ // ⚔️ slash verde
-        { hitShape: 'cone', visual: 'slash', range: 180, angle: 55, duration: 150, particleCount: 5, color: '#3ecf5e', particleColor: '#7bffa0' },
-        { hitShape: 'cone', visual: 'slash', range: 250, angle: 100, duration: 220, particleCount: 14, color: '#3ecf5e', particleColor: '#7bffa0' },
-        { hitShape: 'circle', visual: 'circle', range: 400, startRange: 60, duration: 600, particleCount: 24, color: '#3ecf5e', particleColor: '#a0ffc0' },
+    guerrero: [ // ⚔️ Amarillo oro
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 75, duration: 350, color: '#ffd700' },
+        { hitShape: 'cone', visual: 'wave', range: 250, angle: 100, startRange: 60, duration: 450, lineWidth: 4, waveOffsets: RT_WAVE_FAN_OFFSETS, color: '#ffd700' },
+        { hitShape: 'circle', visual: 'circle', range: 350, startRange: 60, duration: 550, color: '#ffd700' },
     ],
-    barbaro: [ // 🪓 slash rojo, sangriento
-        { hitShape: 'cone', visual: 'slash', range: 160, angle: 50, duration: 180, particleCount: 8, color: '#ff4d4d', particleColor: '#ff8080' },
-        { hitShape: 'cone', visual: 'slash', range: 230, angle: 110, duration: 320, particleCount: 16, color: '#8b1a1a', particleColor: '#c0392b' },
-        { hitShape: 'circle', visual: 'circle', range: 350, startRange: 70, duration: 550, particleCount: 26, color: '#c0392b', particleColor: '#ff4d4d' },
+    barbaro: [ // 🪓 Rojo vinotinto
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 75, duration: 350, color: '#8b0000' },
+        { hitShape: 'cone', visual: 'wave', range: 230, angle: 110, startRange: 70, duration: 500, lineWidth: 6, waveOffsets: RT_WAVE_FAN_OFFSETS, color: '#8b0000' },
+        { hitShape: 'circle', visual: 'circle', range: 320, startRange: 70, duration: 500, color: '#8b0000' },
     ],
-    tanque: [ // 🔨 slash gris/azul, defensivo
-        { hitShape: 'cone', visual: 'slash', range: 170, angle: 60, duration: 180, particleCount: 8, color: '#9fb4c7', particleColor: '#d0dce6' },
-        { hitShape: 'cone', visual: 'slash', range: 240, angle: 130, duration: 250, particleCount: 10, color: '#4a90d9', particleColor: '#8ec0ff' },
-        { hitShape: 'circle', visual: 'circle', range: 380, startRange: 80, duration: 500, particleCount: 22, color: '#4a90d9', particleColor: '#8ec0ff' },
+    tanque: [ // 🔨 Azul oscuro royal
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 75, duration: 350, color: '#4169e1' },
+        { hitShape: 'cone', visual: 'wave', range: 240, angle: 130, startRange: 80, duration: 400, lineWidth: 5, waveOffsets: RT_WAVE_FAN_OFFSETS, color: '#4169e1' },
+        { hitShape: 'circle', visual: 'circle', range: 350, startRange: 80, duration: 550, color: '#4169e1' },
     ],
-    mago: [ // 🧙 SIN CAMBIOS: proyectiles mágicos, look original preservado
-        { hitShape: 'cone', visual: 'cone', range: 250, angle: 30, duration: 220, particleCount: 8, color: '#b366ff', particleColor: '#d9b3ff' },
-        { hitShape: 'cone', visual: 'cone', range: 300, angle: 40, duration: 260, particleCount: 12, color: '#3399ff', particleColor: '#99ccff' },
-        { hitShape: 'circle', visual: 'circle', range: 400, startRange: 160, duration: 400, particleCount: 24, color: '#cc66ff', particleColor: '#e6b3ff' },
+    mago: [ // 🧙 Azul claro neon
+        { hitShape: 'cone', visual: 'cone', range: 250, angle: 60, duration: 350, color: '#00ffff' },
+        { hitShape: 'cone', visual: 'cone', range: 300, angle: 40, duration: 260, color: '#00ffff' },
+        { hitShape: 'circle', visual: 'circle', range: 360, startRange: 60, duration: 600, color: '#00ffff' },
     ],
-    arquero: [ // 🏹 flechas doradas, angostas y precisas
-        { hitShape: 'cone', visual: 'arrow', range: 350, angle: 30, duration: 100, particleCount: 4, color: '#ffd700', particleColor: '#ffe680' },
-        { hitShape: 'offsetCircle', visual: 'arrowRain', range: 250, offsetRange: 400, duration: 250, particleCount: 12, color: '#ffd700', particleColor: '#ffe680' },
-        { hitShape: 'cone', visual: 'arrow', range: 350, angle: 13, duration: 450, particleCount: 14, color: '#ffcc00', particleColor: '#fff2b3', fragments: true },
+    arquero: [ // 🏹 Verde bosque — cono largo/angosto con abanico de flechas
+        { hitShape: 'cone', visual: 'coneArrows', range: 350, angle: 45, duration: 350, color: '#228b22' },
+        { hitShape: 'offsetCircle', visual: 'arrowRain', range: 250, offsetRange: 400, duration: 250, color: '#228b22' },
+        { hitShape: 'circle', visual: 'circle', range: 330, startRange: 50, duration: 500, color: '#228b22' },
     ],
     desarmado: [ // sin especificación propia: se mantiene el look de cono original
-        { hitShape: 'cone', visual: 'cone', range: 120, angle: 60, duration: 200, particleCount: 6, color: '#ffffff', particleColor: '#dddddd' },
-        { hitShape: 'cone', visual: 'cone', range: 150, angle: 70, duration: 220, particleCount: 8, color: '#ffffff', particleColor: '#dddddd' },
-        { hitShape: 'circle', visual: 'circle', range: 250, startRange: 60, duration: 400, particleCount: 16, color: '#ffffff', particleColor: '#dddddd' },
+        { hitShape: 'cone', visual: 'cone', range: 120, angle: 60, duration: 200, color: '#ffffff' },
+        { hitShape: 'cone', visual: 'cone', range: 150, angle: 70, duration: 220, color: '#ffffff' },
+        { hitShape: 'circle', visual: 'circle', range: 250, startRange: 60, duration: 400, color: '#ffffff' },
     ],
 };
 function getAttackGeometry(profId, slot) {
@@ -768,10 +849,9 @@ function getAttackGeometry(profId, slot) {
 }
 
 // ----- IA DE ENEMIGOS (persiguen y atacan en tiempo real) -----
-const ENEMY_VISUAL_RANGE = 800;  // detectan al jugador y empiezan a perseguir
+const ENEMY_VISUAL_RANGE = 500;  // detectan al jugador y empiezan a perseguir
 const ENEMY_LEASH_RANGE = 1300;  // dejan de perseguir si el jugador se aleja más que esto
-const ENEMY_ATTACK_RANGE = 150;  // se detienen y atacan
-const ENEMY_ATTACK_DELAY_MS = [1500, 2000]; // rango de delay entre ataques propios
+const ENEMY_ATTACK_RANGE = 150;  // respaldo si un tipo no define su propio attackRange (ver ENEMY_TYPES)
 
 // ----- RECURSOS (nodos de recolección) -----
 const RESOURCE_TYPES = {

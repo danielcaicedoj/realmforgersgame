@@ -7,9 +7,18 @@
 function buildAttacksHTML(profId, tierId, mult, level) {
     const base = getWeaponAttacksForTier(profId, tierId);
     const controlLabels = ['🖱️Izq', '🖱️Der', 'R'];
+    const toggleCfg = RT_TOGGLE_SKILLS[profId];
     if (base) {
         const real = scaleAttacksByMult(base, mult || 1);
         return [...real.basic, real.special].map((atk, idx) => {
+            // Ataque 2: habilidad toggle (ver RT_TOGGLE_SKILLS), ya no un
+            // golpe con daño/cooldown propios — se muestra su nombre y el
+            // cooldown de ACTIVACIÓN en su lugar.
+            if (idx === 1) {
+                if (!toggleCfg) return '';
+                const cdS = (toggleCfg.activateCooldownMs / 1000).toFixed(1).replace(/\.0$/, '');
+                return `<div class="atk-line">${toggleCfg.emoji} <b>${toggleCfg.name}</b> — Habilidad toggle · ${controlLabels[1]} · CD activación ${cdS}s</div>`;
+            }
             const isSpecial = idx === 2;
             let dmgLabel = `${atk.damage} dmg`;
             if (atk.hits) dmgLabel = `${atk.damage} dmg x${atk.hits}`;
@@ -552,7 +561,9 @@ const UI = {
     // + los 3 específicos de su categoría, ver enchantments.js) se puede
     // subir de nivel pagando con núcleos de esa Rareza y Tier igual o
     // superior al del arma.
-    renderEnchantments(player) {
+    renderEnchantments(player, canEnchant) {
+        if (canEnchant !== undefined) this._enchantCanApply = canEnchant;
+        if (this._enchantCanApply === undefined) this._enchantCanApply = false;
         const container = document.getElementById('enchant-list');
         container.innerHTML = '';
 
@@ -648,7 +659,10 @@ const UI = {
             const select = row.querySelector('[data-nucleo-select]');
             const applyBtn = row.querySelector('[data-apply-enchant]');
             const affordable = compatible.some(c => c.qty >= upgrade.cost);
-            if (!affordable) {
+            if (!this._enchantCanApply) {
+                applyBtn.disabled = true;
+                applyBtn.textContent = 'Necesitas al Hechicero ✨ cerca';
+            } else if (!affordable) {
                 applyBtn.disabled = true;
                 applyBtn.textContent = `Faltan núcleos (${upgrade.cost})`;
             }
@@ -668,7 +682,9 @@ const UI = {
     // separados — Clases de Combate (armas/armadura/monturas) arriba y
     // Clases de Recolección (materias primas/alimentos/pociones/núcleos)
     // abajo, con un separador entre ambos (ver CSS .craft-prof-separator).
-    renderCraft(player) {
+    renderCraft(player, canCraft) {
+        if (canCraft !== undefined) this._craftCanCraft = canCraft;
+        if (this._craftCanCraft === undefined) this._craftCanCraft = false;
         if (!this._craftProf) this._craftProf = 'picaro'; // id de profesión, o '__potion__'/'__food__'/'__mount__'/'__nucleo__'
 
         const selectorEl = document.getElementById('craft-prof-selector');
@@ -789,10 +805,9 @@ const UI = {
                 else statPreview = `⚔ ${Math.round(prof.baseDamage * tier.mult * rarity.mult * 10) / 10}`;
                 preview.innerHTML = `<span style="color:${rarity.color}">${statPreview}</span>`;
                 const affordable = haveMat >= oreCost && haveWood >= woodCost && haveCore >= CRAFT_CORE_COST;
-                craftBtn.disabled = !affordable;
-                craftBtn.textContent = affordable ? 'Craftear'
-                    : (haveMat < oreCost ? `Falta ${matInfo.name}`
-                    : (haveWood < woodCost ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`));
+                const missingLabel = haveMat < oreCost ? `Falta ${matInfo.name}`
+                    : (haveWood < woodCost ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`);
+                this._gateCraftBtn(craftBtn, affordable, missingLabel);
             };
             raritySelect.addEventListener('change', updatePreview);
             updatePreview();
@@ -814,6 +829,20 @@ const UI = {
 
             listEl.appendChild(row);
         });
+    },
+
+    // Aplica el bloqueo de "cerca del Artesano ⚒" a un botón de craftear:
+    // si no se está cerca, el botón queda siempre deshabilitado sin importar
+    // si el jugador tiene los materiales; si se está cerca, se aplica la
+    // lógica normal de asequibilidad.
+    _gateCraftBtn(btn, affordable, missingLabel) {
+        if (!this._craftCanCraft) {
+            btn.disabled = true;
+            btn.textContent = 'Necesitas al Artesano ⚒️ cerca';
+        } else {
+            btn.disabled = !affordable;
+            btn.textContent = affordable ? 'Craftear' : missingLabel;
+        }
     },
 
     // Modo "🍽️ ALIMENTOS" del panel de crafteo: primero se elige el tier
@@ -881,8 +910,8 @@ const UI = {
                 const version = food.versions[rarityId];
                 preview.innerHTML = `<span style="color:${rarity.color}">${buildFoodEffectLabel(food, version)}</span>`;
                 const affordable = haveCultivo >= FOOD_CULTIVO_COST && haveCore >= CRAFT_CORE_COST;
-                craftBtn.disabled = !affordable;
-                craftBtn.textContent = affordable ? 'Craftear' : (haveCultivo < FOOD_CULTIVO_COST ? `Falta ${cultivoInfo.name}` : `Falta núcleo ${rarity.name}`);
+                const missingLabel = haveCultivo < FOOD_CULTIVO_COST ? `Falta ${cultivoInfo.name}` : `Falta núcleo ${rarity.name}`;
+                this._gateCraftBtn(craftBtn, affordable, missingLabel);
             };
             raritySelect.addEventListener('change', updatePreview);
             updatePreview();
@@ -954,10 +983,9 @@ const UI = {
                 const speedPercent = getMountSpeedPercent(tierId, rarityId);
                 preview.innerHTML = `<span style="color:${rarity.color}">🏃 +${speedPercent}%</span>`;
                 const affordable = haveOre >= cost.ore && haveWood >= cost.wood && haveCore >= cost.nucleo;
-                craftBtn.disabled = !affordable;
-                craftBtn.textContent = affordable ? 'Craftear'
-                    : (haveOre < cost.ore ? `Falta ${oreInfo.name}`
-                    : (haveWood < cost.wood ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`));
+                const missingLabel = haveOre < cost.ore ? `Falta ${oreInfo.name}`
+                    : (haveWood < cost.wood ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`);
+                this._gateCraftBtn(craftBtn, affordable, missingLabel);
             };
             raritySelect.addEventListener('change', updatePreview);
             updatePreview();
@@ -1050,7 +1078,8 @@ const UI = {
                 const upBtn = document.createElement('button');
                 upBtn.className = 'apply-btn craft-btn';
                 const affordUp = have >= 10;
-                upBtn.disabled = !affordUp;
+                upBtn.disabled = !affordUp || !this._craftCanCraft;
+                upBtn.title = !this._craftCanCraft ? 'Necesitas al Artesano ⚒️ cerca' : '';
                 upBtn.textContent = `⬆️ 10→1 ${nextRarity.name}`;
                 upBtn.addEventListener('click', () => {
                     if (!window.confirm(`¿Craftear 10 Núcleos ${rarity.name} T${tierId} en 1 Núcleo ${nextRarity.name} T${tierId}?`)) return;
@@ -1067,7 +1096,8 @@ const UI = {
                 const downBtn = document.createElement('button');
                 downBtn.className = 'apply-btn craft-btn';
                 const affordDown = have >= 1;
-                downBtn.disabled = !affordDown;
+                downBtn.disabled = !affordDown || !this._craftCanCraft;
+                downBtn.title = !this._craftCanCraft ? 'Necesitas al Artesano ⚒️ cerca' : '';
                 downBtn.textContent = `⬇️ 1→10 ${prevRarity.name}`;
                 downBtn.addEventListener('click', () => {
                     if (!window.confirm(`¿Descraftear 1 Núcleo ${rarity.name} T${tierId} en 10 Núcleos ${prevRarity.name} T${tierId}?`)) return;
@@ -1089,7 +1119,7 @@ const UI = {
     // (Ataque1/2/3), barra de carga universal (0-10) y panel del enemigo
     // vivo más cercano. Reemplaza la vieja pantalla modal de combate por
     // turnos.
-    updateCombatHUD(player, inTaberna) {
+    updateCombatHUD(player, inTaberna, attack1Held) {
         const hudEl = document.getElementById('combat-hud');
         const nearbyEl = document.getElementById('nearby-enemy-panel');
         if (inTaberna) {
@@ -1100,16 +1130,40 @@ const UI = {
         if (hudEl) hudEl.classList.remove('hidden');
 
         const now = Date.now();
+        const toggleCfg = RT_TOGGLE_SKILLS[player.activeProfession];
         for (let i = 0; i < 3; i++) {
             const circle = document.getElementById(`cd-circle-${i}`);
             const timerEl = document.getElementById(`cd-timer-${i}`);
             if (!circle) continue;
-            const total = getAttackCooldownMs(player.activeProfession, i, player.level);
+
+            if (i === 1) {
+                // Ataque 2: habilidad toggle (ver Combat.skill2) — el
+                // círculo ya no representa un cooldown de disparo, sino el
+                // cooldown de ACTIVACIÓN (mientras inactiva) o los stacks
+                // actuales (mientras activa).
+                const active = Combat.skill2.active && Combat.skill2.profId === player.activeProfession;
+                const cdTotal = toggleCfg ? toggleCfg.activateCooldownMs : 2500;
+                const cdRemaining = Math.max(0, Combat.skill2.activateCooldownUntil - now);
+                const onCooldown = !active && cdRemaining > 0;
+                circle.classList.toggle('ready', !active && !onCooldown);
+                circle.classList.toggle('toggle-active', active);
+                circle.style.borderColor = active && toggleCfg ? toggleCfg.color : '';
+                circle.style.setProperty('--cd-pct', onCooldown ? `${Math.min(1, cdRemaining / cdTotal) * 360}deg` : '0deg');
+                timerEl.textContent = active ? `${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX}` : (onCooldown ? (cdRemaining / 1000).toFixed(1) : '✓');
+                continue;
+            }
+
+            // Ataque 1: el cooldown ya reducido por stacks de Pícaro/Arquero
+            // (ver Combat.getSkill2CooldownReductionMs) — mismo valor que
+            // realmente se usó al fijar Combat.cooldownUntil[0].
+            const cdReduction = i === 0 ? Combat.getSkill2CooldownReductionMs(player.activeProfession) : 0;
+            const total = Math.max(1, getAttackCooldownMs(player.activeProfession, i, player.level) - cdReduction);
             const remaining = Math.max(0, Combat.cooldownUntil[i] - now);
             const pct = total > 0 ? Math.min(1, remaining / total) : 0;
             const specialReady = i < 2 || Combat.charge >= RT_CHARGE_MAX;
             const ready = remaining <= 0 && specialReady;
             circle.classList.toggle('ready', ready);
+            if (i === 0) circle.classList.toggle('continuous-active', !!attack1Held);
             circle.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
             if (remaining > 0) {
                 timerEl.textContent = (remaining / 1000).toFixed(1);
@@ -1125,6 +1179,26 @@ const UI = {
         if (chargeFill) chargeFill.style.width = `${chargePct}%`;
         const chargeText = document.getElementById('charge-bar-text');
         if (chargeText) chargeText.textContent = `Cargas: ${Combat.charge}/${RT_CHARGE_MAX}`;
+
+        // Estado de la habilidad toggle (nombre + ACTIVA/inactiva + stacks
+        // o cooldown restante), ver RT_TOGGLE_SKILLS.
+        const skill2StatusEl = document.getElementById('skill2-status');
+        if (skill2StatusEl) {
+            if (!toggleCfg) {
+                skill2StatusEl.classList.add('hidden');
+            } else {
+                skill2StatusEl.classList.remove('hidden');
+                const active = Combat.skill2.active && Combat.skill2.profId === player.activeProfession;
+                if (active) {
+                    skill2StatusEl.innerHTML = `${toggleCfg.emoji} ${toggleCfg.name}: <span style="color:${toggleCfg.color}">ACTIVA</span> (${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX} stacks)`;
+                } else {
+                    const cdRemaining = Math.max(0, Combat.skill2.activateCooldownUntil - now);
+                    skill2StatusEl.textContent = cdRemaining > 0
+                        ? `${toggleCfg.emoji} ${toggleCfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
+                        : `${toggleCfg.emoji} ${toggleCfg.name}: click derecho para activar`;
+                }
+            }
+        }
 
         // Enemigo vivo más cercano (dentro de un radio de referencia), con
         // su nombre/rareza/HP en tiempo real.
@@ -1148,6 +1222,52 @@ const UI = {
                 panel.classList.add('hidden');
             }
         }
+    },
+
+    // Efectos activos del jugador, debajo del recuadro de personaje: por
+    // ahora el bono actual de la habilidad toggle (ver RT_TOGGLE_SKILLS —
+    // ej. "+20% daño" con 10/10 stacks de Guerrero), el escudo, la
+    // quemadura y la penalización de XP de jefe. Se oculta si no hay nada
+    // activo.
+    updateEffectsHUD(player) {
+        const el = document.getElementById('effects-hud');
+        if (!el) return;
+
+        const lines = [];
+        const profId = player.activeProfession;
+        const skill2Active = Combat.skill2.active && Combat.skill2.profId === profId;
+        if (skill2Active && Combat.skill2.stacks > 0) {
+            const cfg = RT_TOGGLE_SKILLS[profId];
+            if (cfg) {
+                const parts = [];
+                const dmgPct = Combat.getSkill2DamageBonusPercent(profId);
+                if (dmgPct > 0) parts.push(`+${Math.round(dmgPct * 100)}% daño`);
+                const speedPct = Combat.getSkill2SpeedBonusPercent(profId);
+                if (speedPct > 0) parts.push(`+${Math.round(speedPct * 100)}% velocidad`);
+                const cdMs = Combat.getSkill2CooldownReductionMs(profId);
+                if (cdMs > 0) parts.push(`-${(cdMs / 1000).toFixed(1)}s CD Ataque 1`);
+                const lifestealPct = Combat.getSkill2LifestealBonusPercent(profId);
+                if (lifestealPct > 0) parts.push(`+${Math.round(lifestealPct * 100)}% robo de vida`);
+                const defPct = Combat.getSkill2DefenseBonusPercent(profId);
+                if (defPct > 0) parts.push(`+${Math.round(defPct * 100)}% mitigación`);
+                if (parts.length) {
+                    lines.push({ color: cfg.color, text: `${cfg.emoji} ${parts.join(', ')} (${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX})` });
+                }
+            }
+        }
+        if (player.shield && player.shield.amount > 0) {
+            lines.push({ color: '#8ec0ff', text: `🛡️ Escudo +${Math.round(player.shield.amount)} HP` });
+        }
+        if (player.burn) {
+            lines.push({ color: '#ff8080', text: '🔥 Quemado' });
+        }
+        if (player.xpPenaltyUntil && Date.now() < player.xpPenaltyUntil) {
+            lines.push({ color: '#e93cff', text: `💀 -${Math.round((player.xpPenalty || 0) * 100)}% XP` });
+        }
+
+        if (!lines.length) { el.classList.add('hidden'); return; }
+        el.classList.remove('hidden');
+        el.innerHTML = lines.map(l => `<div style="color:${l.color}">${l.text}</div>`).join('');
     },
 
     // Panel de precisión de Oro: se abre al hacer click en el chip de Oro

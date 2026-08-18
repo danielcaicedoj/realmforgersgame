@@ -64,6 +64,26 @@ canvas {
     user-select: none;
 }
 #floor-boss-icon { font-size: 11px; }
+
+/* Recordatorio de controles (ver SISTEMA DE CONTROLES), apilado justo
+   arriba de #floor-hud en la esquina inferior izquierda. */
+#controls-hud {
+    position: absolute;
+    bottom: 42px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 9.5px;
+    color: #b8aed8;
+    background: rgba(10, 8, 18, 0.72);
+    border: 1px solid #4a3f6b;
+    border-radius: 6px;
+    padding: 5px 8px;
+    pointer-events: none;
+    user-select: none;
+}
+.controls-hint { opacity: 0.65; }
 #floor-boss-icon.hidden { display: none; }
 
 /* Arriba a la derecha: contador del Jefe Final + zonas de Alteración */
@@ -624,7 +644,23 @@ canvas {
 .cooldown-circle.ready { border-color: #3ecf5e; box-shadow: 0 0 8px rgba(62, 207, 94, 0.6); }
 .cooldown-circle-special { border-color: #c9a63a; }
 .cooldown-circle-special.ready { border-color: #ffd700; box-shadow: 0 0 10px rgba(255, 215, 0, 0.7); }
-.cd-key { font-size: 10px; opacity: 0.85; }
+/* Ataque 2 (cd-circle-1) mientras la habilidad toggle está ACTIVA (ver
+   RT_TOGGLE_SKILLS/Combat.skill2 en combat.js): pulso continuo en vez del
+   relleno de cooldown normal, el borde toma el color de la clase (inline). */
+.cooldown-circle.toggle-active { animation: toggle-pulse 1.2s ease-in-out infinite; }
+@keyframes toggle-pulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(255,255,255,0.5); }
+    50% { box-shadow: 0 0 18px rgba(255,255,255,0.9); }
+}
+/* Ataque 1 (cd-circle-0) mientras se mantiene la tecla "1" o el click
+   izquierdo (ver attack1KeyHeld/attack1MouseHeld en game.js): indicador de
+   "atacando continuamente" — pulso más rápido que el del toggle. */
+.cooldown-circle.continuous-active { animation: continuous-pulse 0.5s ease-in-out infinite; }
+@keyframes continuous-pulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(255, 209, 128, 0.5); }
+    50% { box-shadow: 0 0 16px rgba(255, 209, 128, 0.95); }
+}
+.cd-key { font-size: 9px; opacity: 0.85; }
 .cd-timer { font-size: 13px; font-weight: bold; }
 #charge-bar-track {
     width: 220px;
@@ -641,6 +677,8 @@ canvas {
     transition: width 0.15s ease-out;
 }
 #charge-bar-text { font-size: 11px; font-weight: bold; color: #ffd27a; }
+#skill2-status { font-size: 11px; color: #a0c8ff; text-align: center; }
+#skill2-status.hidden { display: none; }
 
 /* Panel del enemigo más cercano (esquina superior izquierda, debajo del HUD principal) */
 #nearby-enemy-panel {
@@ -658,6 +696,28 @@ canvas {
 #nearby-enemy-panel.hidden { display: none; }
 #nearby-enemy-name { font-size: 12px; font-weight: bold; margin-bottom: 4px; }
 #nearby-enemy-hp-text { font-size: 10.5px; opacity: 0.8; margin-top: 3px; }
+
+/* Efectos activos del jugador (ver UI.updateEffectsHUD): debajo del HUD
+   principal y del panel del enemigo cercano, para no superponerse con
+   ninguno de los dos aunque ambos estén visibles a la vez. */
+#effects-hud {
+    position: absolute;
+    top: 156px;
+    left: 10px;
+    max-width: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(10, 8, 18, 0.72);
+    border: 1px solid #4a3f6b;
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 10.5px;
+    font-weight: bold;
+    pointer-events: none;
+    user-select: none;
+}
+#effects-hud.hidden { display: none; }
 
 /* ===== Mapa ampliado ===== */
 .map-panel { width: min(860px, 94%); }

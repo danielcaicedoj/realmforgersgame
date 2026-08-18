@@ -512,8 +512,11 @@ function generarTaberna() {
 
     const room = { x: originX, y: originY, w: anchoTotal, h: altoTotal };
     // Mercader detrás del "mostrador", pegado a la pared superior y
-    // centrado horizontalmente (ver drawTabernaDecor en game.js).
+    // centrado horizontalmente (ver drawTabernaDecor en game.js). Artesano
+    // (crafteo) y Hechicero (encantamientos) a los lados, misma fila.
     const mercaderPos = { x: originX + anchoTotal / 2, y: originY + 150 };
+    const artesanoPos = { x: originX + anchoTotal * 0.75, y: originY + 150 };
+    const hechiceroPos = { x: originX + anchoTotal * 0.25, y: originY + 150 };
 
     return {
         numeroDelPiso: null,
@@ -529,6 +532,8 @@ function generarTaberna() {
         renderWalls: (ctx, camera, w, h) => renderWallsGrid(tm, ctx, camera, w, h, TABERNA_THEME.wallColor),
         posicionJugadorInicio: { x: POSICION_JUGADOR_INICIO.x, y: POSICION_JUGADOR_INICIO.y },
         mercaderPos,
+        artesanoPos,
+        hechiceroPos,
         biome: TABERNA_THEME,
         esTaberna: true,
         portales: [],
