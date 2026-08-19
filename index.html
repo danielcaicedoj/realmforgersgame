@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Forjadores del Reino — RPG de Armas</title>
-<link rel="stylesheet" href="styles.css?v=139">
+<link rel="stylesheet" href="styles.css?v=146">
 </head>
 <body>
 <div id="game-container">
@@ -189,35 +189,47 @@
         <div id="floors-body" class="panel-body"></div>
     </div>
 
-    <!-- HUD de Combate en Tiempo Real (ver combat.js): 3 cooldowns +
+    <!-- HUD de Combate en Tiempo Real (ver combat.js): 4 cooldowns +
          carga universal + panel del enemigo más cercano. Reemplaza la
          vieja pantalla modal de combate por turnos. -->
     <div id="combat-hud">
         <div id="cooldown-row">
             <div class="cooldown-circle" id="cd-circle-0" style="--cd-pct:0deg">
-                <span class="cd-key">1 /🖱️Izq</span>
+                <span class="cd-key">🖱️Izq</span>
                 <span class="cd-timer" id="cd-timer-0">✓</span>
+            </div>
+            <div class="cooldown-circle" id="cd-circle-3" style="--cd-pct:0deg">
+                <span class="cd-key">1</span>
+                <span class="cd-timer" id="cd-timer-3">✓</span>
             </div>
             <div class="cooldown-circle" id="cd-circle-1" style="--cd-pct:0deg">
                 <span class="cd-key">2</span>
                 <span class="cd-timer" id="cd-timer-1">✓</span>
             </div>
-            <div class="cooldown-circle cooldown-circle-special" id="cd-circle-2" style="--cd-pct:0deg">
+            <div class="cooldown-circle" id="cd-circle-4" style="--cd-pct:0deg">
                 <span class="cd-key">3</span>
+                <span class="cd-timer" id="cd-timer-4">✓</span>
+            </div>
+            <div class="cooldown-circle cooldown-circle-special" id="cd-circle-2" style="--cd-pct:0deg">
+                <span class="cd-key">Espacio</span>
                 <span class="cd-timer" id="cd-timer-2">0/10</span>
             </div>
         </div>
         <div id="charge-bar-track"><div id="charge-bar-fill"></div></div>
         <div id="charge-bar-text">Cargas: 0/10</div>
         <div id="skill2-status" class="hidden"></div>
+        <div id="skill1-status" class="hidden"></div>
+        <div id="skill3-status" class="hidden"></div>
     </div>
 
     <!-- Recordatorio de controles (ver SISTEMA DE CONTROLES): estático, no
          requiere JS para actualizarse. -->
     <div id="controls-hud">
-        <div>[1] / 🖱️Izq — Ataque 1 <span class="controls-hint">(mantener: continuo)</span></div>
+        <div>🖱️Izq — Ataque 1 <span class="controls-hint">(mantener: continuo)</span></div>
+        <div>[1] — Hechizo de clase <span class="controls-hint">(mantener apunta, soltar lanza)</span></div>
         <div>[2] — Ataque 2 <span class="controls-hint">(toggle)</span></div>
-        <div>[3] — Ataque 3 <span class="controls-hint">(10 cargas)</span></div>
+        <div>[3] — Hechizo de clase <span class="controls-hint">(instantáneo, según mouse)</span></div>
+        <div>Espacio — Ataque 3 <span class="controls-hint">(10 cargas)</span></div>
         <div>WASD — Movimiento</div>
     </div>
 
@@ -238,20 +250,20 @@
     <div id="teleport-fade" class="hidden"></div>
 </div>
 
-<script src="js/constants.js?v=139"></script>
-<script src="js/foods.js?v=139"></script>
-<script src="js/weapon-attacks.js?v=139"></script>
-<script src="js/floors.js?v=139"></script>
-<script src="js/grid-dungeon.js?v=139"></script>
-<script src="js/enchantments.js?v=139"></script>
-<script src="js/mounts.js?v=139"></script>
-<script src="js/shop.js?v=139"></script>
-<script src="js/weapons.js?v=139"></script>
-<script src="js/storage.js?v=139"></script>
-<script src="js/player.js?v=139"></script>
-<script src="js/enemy.js?v=139"></script>
-<script src="js/combat.js?v=139"></script>
-<script src="js/ui.js?v=139"></script>
-<script src="js/game.js?v=139"></script>
+<script src="js/constants.js?v=146"></script>
+<script src="js/foods.js?v=146"></script>
+<script src="js/weapon-attacks.js?v=146"></script>
+<script src="js/floors.js?v=146"></script>
+<script src="js/grid-dungeon.js?v=146"></script>
+<script src="js/enchantments.js?v=146"></script>
+<script src="js/mounts.js?v=146"></script>
+<script src="js/shop.js?v=146"></script>
+<script src="js/weapons.js?v=146"></script>
+<script src="js/storage.js?v=146"></script>
+<script src="js/player.js?v=146"></script>
+<script src="js/enemy.js?v=146"></script>
+<script src="js/combat.js?v=146"></script>
+<script src="js/ui.js?v=146"></script>
+<script src="js/game.js?v=146"></script>
 </body>
 </html>

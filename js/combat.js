@@ -29,6 +29,18 @@
 const RT_CHARGE_RING_MS = 400; // cuánto tarda en llenarse el anillo visual de carga del Ataque 3 mientras se mantiene R
 const RT_POTION_COOLDOWN_MS = 2000; // reemplaza el viejo límite "3 por combate / 1 por turno"
 
+// Distancia de un punto (px,py) al SEGMENTO (x1,y1)-(x2,y2) — usado por el
+// barrido de daño de los dashes/saltos del hechizo de tecla "1" (ver
+// Combat.updateRealtime/this.leap) para no saltearse enemigos entre frames.
+function distancePointToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq > 0 ? ((px - x1) * dx + (py - y1) * dy) / lenSq : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = x1 + t * dx, cy = y1 + t * dy;
+    return Math.hypot(px - cx, py - cy);
+}
+
 const Combat = {
     player: null,
     enemies: [], // referencia viva al array de enemigos del piso actual (se refresca cada updateRealtime)
@@ -47,6 +59,26 @@ const Combat = {
     // activa y se pierde al desactivar o cambiar de profesión activa.
     skill2: { active: false, profId: null, stacks: 0, activateCooldownUntil: 0, lastTickAt: 0, orbitStartAt: 0 },
 
+    // Hechizo nuevo de tecla "1" (ver RT_SKILL1_ABILITIES): `aiming` es el
+    // modo "manteniendo 1" (dibuja vista previa, ver renderSkill1Aim);
+    // `cooldownUntil` es único (no por clase, mismo patrón que
+    // cooldownUntil[0..2] — cambiar de clase no lo resetea). El resto son
+    // estados propios de cada clase (Bárbaro/Mago/Arquero).
+    skill1: { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0 },
+    skill1CooldownUntil: 0,
+    leap: null, // dash/salto/teletransporte en curso (ver startLeap) — { kind, startX/Y, endX/Y, startAt, durationMs, hitSet, onHitEnemy?, onComplete? }
+    zones: [],  // áreas persistentes en el suelo (ver RT_SKILL1_ABILITIES.guerrero/tanque) — [{ kind, x, y, radius, expiresAt, ... }]
+    dungeon: null, // referencia viva al dungeon del piso actual (se refresca cada updateRealtime) — usada para clampear destinos de dash/salto/teletransporte a zonas caminables
+
+    // Hechizo nuevo de tecla "3" (ver RT_SKILL3_ABILITIES): mismo patrón de
+    // "mantener para apuntar, soltar para lanzar" que la tecla "1" (ver
+    // skill1.aiming). Por ahora solo el Mago tiene una entrada (Vórtice
+    // Arcano, único proyectil activo a la vez); `skill3CooldownUntil` es
+    // único, mismo patrón que skill1CooldownUntil.
+    skill3: { aiming: false },
+    skill3CooldownUntil: 0,
+    vortex: null, // { profId, cfg, x, y, startX/Y, endX/Y, startAt, travelDurationMs, currentRadius, finalRadius, phase: 'traveling'|'static', hitSet, staticUntil, lastStaticTickAt, tierMult, rarityMult, rotationStartAt }
+
     potionCooldownUntil: 0,
 
     onKillHook: null,       // (enemyInstance) => void; lo setea game.js para el spawn dinámico de jefes
@@ -63,6 +95,14 @@ const Combat = {
         this.charging = false;
         this.classCharge = { prof: null, count: 0 };
         this.skill2 = { active: false, profId: null, stacks: 0, activateCooldownUntil: 0, lastTickAt: 0, orbitStartAt: 0 };
+        this.skill1 = { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0 };
+        this.skill1CooldownUntil = 0;
+        this.leap = null;
+        this.zones = [];
+        this.dungeon = null;
+        this.skill3 = { aiming: false };
+        this.skill3CooldownUntil = 0;
+        this.vortex = null;
         this.potionCooldownUntil = 0;
         this._basicStreak = 0;
         this.effects = [];
@@ -110,12 +150,110 @@ const Combat = {
     updateRealtime(dt, enemies, player, dungeon) {
         this.enemies = enemies;
         this.player = player;
+        this.dungeon = dungeon;
         const now = Date.now();
 
         // Anillo de carga del Ataque 3: se dispara solo al completarse,
         // aunque el jugador siga manteniendo R (ver bindInput en game.js).
         if (this.charging && now - this.chargeStartAt >= RT_CHARGE_RING_MS) {
             this.fireCharge();
+        }
+
+        // Dash/salto/teletransporte en curso del hechizo de tecla "1" (ver
+        // startLeap): interpola la posición del jugador cada frame y, si
+        // `sweep` está activo, va detectando enemigos recién tocados a lo
+        // largo del camino (una sola vez cada uno, ver hitSet).
+        if (this.leap) {
+            // Barrido por SEGMENTO (posición previa -> nueva), no solo un
+            // chequeo puntual en la posición actual: con dashes de 100ms a
+            // 400px, cada frame puede avanzar decenas de píxeles, así que un
+            // chequeo puntual puede "saltearse" enemigos parados entre dos
+            // frames consecutivos. Point-to-segment en vez de point-to-point.
+            const prevX = this.player.x, prevY = this.player.y;
+            const t = Math.min(1, (now - this.leap.startAt) / this.leap.durationMs);
+            this.player.x = this.leap.startX + (this.leap.endX - this.leap.startX) * t;
+            this.player.y = this.leap.startY + (this.leap.endY - this.leap.startY) * t;
+            if (this.leap.sweep && this.leap.onHitEnemy) {
+                this.enemies.forEach(en => {
+                    if (!en.alive || this.leap.hitSet.has(en)) return;
+                    const dist = distancePointToSegment(en.x, en.y, prevX, prevY, this.player.x, this.player.y);
+                    if (dist <= this.player.radius + en.radius) {
+                        this.leap.hitSet.add(en);
+                        this.leap.onHitEnemy(en);
+                    }
+                });
+            }
+            if (t >= 1) {
+                const onComplete = this.leap.onComplete;
+                this.leap = null;
+                if (onComplete) onComplete();
+            }
+        }
+
+        // Furia Sangrienta del Bárbaro (ver RT_SKILL1_ABILITIES.barbaro):
+        // si no se canceló antes con un dash, al vencer su duración arranca
+        // recién ACÁ el cooldown normal (no al activarla).
+        if (this.skill1.barbaroActive && now >= this.skill1.barbaroActiveUntil) {
+            this.skill1.barbaroActive = false;
+            this.skill1CooldownUntil = now + RT_SKILL1_ABILITIES.barbaro.cooldownMs;
+            if (this.spawnFloatingText) {
+                this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `${RT_SKILL1_ABILITIES.barbaro.name} terminada`, '#a0a0a0');
+            }
+        }
+
+        // Zonas persistentes en el suelo (Salto Sísmico del Guerrero /
+        // Bastión del Tanque): poda las vencidas.
+        if (this.zones.length) this.zones = this.zones.filter(z => now < z.expiresAt);
+
+        // Vórtice Arcano del Mago (tecla "3", ver RT_SKILL3_ABILITIES): fase
+        // 'traveling' interpola su posición (velocidad constante) mientras
+        // crece el radio proporcional a lo recorrido, con barrido por
+        // SEGMENTO igual que this.leap (ver distancePointToSegment) para no
+        // saltearse enemigos entre frames; al llegar pasa a 'static' y
+        // tickea daño por segundo hasta vencer su duración.
+        if (this.vortex) {
+            const v = this.vortex;
+            if (v.phase === 'traveling') {
+                const prevX = v.x, prevY = v.y;
+                const t = Math.min(1, (now - v.startAt) / v.travelDurationMs);
+                v.x = v.startX + (v.endX - v.startX) * t;
+                v.y = v.startY + (v.endY - v.startY) * t;
+                const traveledSoFar = Math.hypot(v.x - v.startX, v.y - v.startY);
+                v.currentRadius = v.cfg.minRadius + Math.max(0, (traveledSoFar - v.cfg.growthStartDist) / v.cfg.growthDivisor);
+
+                this.enemies.forEach(en => {
+                    if (!en.alive || v.hitSet.has(en)) return;
+                    const dist = distancePointToSegment(en.x, en.y, prevX, prevY, v.x, v.y);
+                    if (dist <= v.currentRadius + en.radius) {
+                        v.hitSet.add(en);
+                        const dmg = this.computeVortexDamage(v, v.cfg.dmgOnTouch);
+                        const dealt = en.takeDamage(dmg, {});
+                        this.spawnImpactFlash(en.x, en.y, v.cfg.color);
+                        this.floatDamage(en, dealt, false);
+                        if (!en.alive && !en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
+                    }
+                });
+
+                if (t >= 1) {
+                    v.phase = 'static';
+                    v.currentRadius = v.finalRadius;
+                    v.staticUntil = now + v.cfg.staticDurationMs;
+                    v.lastStaticTickAt = now;
+                }
+            } else {
+                if (now - v.lastStaticTickAt >= v.cfg.staticTickMs) {
+                    v.lastStaticTickAt += v.cfg.staticTickMs;
+                    const targets = this.getEnemiesInCircle(v.x, v.y, v.currentRadius);
+                    targets.forEach(en => {
+                        const dmg = this.computeVortexDamage(v, v.cfg.staticTickDmg);
+                        const dealt = en.takeDamage(dmg, {});
+                        this.spawnImpactFlash(en.x, en.y, v.cfg.color);
+                        this.floatDamage(en, dealt, false);
+                        if (!en.alive && !en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
+                    });
+                }
+                if (now >= v.staticUntil) this.vortex = null;
+            }
         }
 
         // Habilidad toggle del Ataque 2 (ver RT_TOGGLE_SKILLS): se apaga
@@ -258,6 +396,8 @@ const Combat = {
         const potenciaMult = 1 + player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
         let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
         dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
+        dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
 
         const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
@@ -274,7 +414,7 @@ const Combat = {
         // Carga universal: +1 por enemigo golpeado (igual que Ataque1).
         this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
 
-        const lifestealPct = (eff.lifestealPercent || 0) + this.getSkill2LifestealBonusPercent(profId);
+        const lifestealPct = (eff.lifestealPercent || 0) + this.getSkill2LifestealBonusPercent(profId) + this.getSkill1LifestealBonusPercent(profId);
         if (lifestealPct > 0 && totalDamage > 0) {
             const healAmt = Math.round(totalDamage * lifestealPct);
             if (healAmt > 0) player.heal(healAmt);
@@ -386,6 +526,602 @@ const Combat = {
         // (redundante con #effects-hud, ver UI.updateEffectsHUD).
     },
 
+    // ----- HECHIZO DE TECLA "1" (ver RT_SKILL1_ABILITIES) -----
+    // Mecánica de disparo compartida por las 6 clases: keydown "1" entra en
+    // modo "apuntando" (ver startAimSkill1), keyup "1" lanza el hechizo
+    // hacia donde apuntaba el mouse en ese instante (ver releaseSkill1 →
+    // fireSkill1 → fireSkill1<Clase>). Bárbaro es la única excepción: su
+    // primera pulsación activa el aura al instante sin apuntar (ver
+    // activateBarbaroFury) — solo la segunda (aura ya activa) entra en modo
+    // apuntando, para el dash de cancelación.
+    startAimSkill1() {
+        if (!this.player || this.player.hp <= 0) return;
+        const profId = this.player.activeProfession;
+        if (profId === 'barbaro' && !this.skill1.barbaroActive) {
+            this.activateBarbaroFury();
+            return;
+        }
+        if (Date.now() < this.skill1CooldownUntil) return;
+        this.skill1.aiming = true;
+    },
+
+    // Soltar la ventana/perder foco mientras se apunta: cancela sin lanzar
+    // (ver blur en game.js/bindInput).
+    cancelAimSkill1() {
+        this.skill1.aiming = false;
+    },
+
+    releaseSkill1(aimWorldPos) {
+        if (!this.skill1.aiming) return;
+        this.skill1.aiming = false;
+        this.fireSkill1(aimWorldPos);
+    },
+
+    fireSkill1(aimWorldPos) {
+        if (!this.player || this.player.hp <= 0) return;
+        const profId = this.player.activeProfession;
+        const cfg = RT_SKILL1_ABILITIES[profId];
+        if (!cfg) return;
+
+        // `aimDist` = distancia real al mouse (Infinity si no hay posición
+        // de mouse todavía, para que el salto/teletransporte caiga al rango
+        // máximo configurado por defecto) — Guerrero/Mago lo usan para
+        // elegir dónde caer DENTRO de su rango en vez de siempre caer al
+        // máximo (ver fireSkill1Guerrero/fireSkill1Mago).
+        let dirX = 0, dirY = -1, aimDist = Infinity;
+        if (aimWorldPos) {
+            dirX = aimWorldPos.x - this.player.x;
+            dirY = aimWorldPos.y - this.player.y;
+            aimDist = Math.hypot(dirX, dirY);
+            const len = aimDist || 1;
+            dirX /= len; dirY /= len;
+        }
+
+        if (profId === 'picaro') this.fireSkill1Picaro(cfg, dirX, dirY);
+        else if (profId === 'guerrero') this.fireSkill1Guerrero(cfg, dirX, dirY, aimDist);
+        else if (profId === 'barbaro') this.fireSkill1BarbaroDash(cfg, dirX, dirY);
+        else if (profId === 'tanque') this.fireSkill1Tanque(cfg);
+        else if (profId === 'mago') this.fireSkill1Mago(cfg, dirX, dirY, aimDist);
+        else if (profId === 'arquero') this.fireSkill1Arquero(cfg, dirX, dirY);
+    },
+
+    // Punto furthest caminable en línea recta desde (fromX,fromY) hacia
+    // (dirX,dirY) hasta `maxDist` (ver dungeon.isWalkable) — usado por todo
+    // dash/salto/teletransporte para no atravesar paredes. Sin `dungeon`
+    // (no debería pasar en juego real), devuelve el destino sin clampear.
+    computeWalkableDestination(fromX, fromY, dirX, dirY, maxDist, radius) {
+        const dungeon = this.dungeon;
+        if (!dungeon) return { x: fromX + dirX * maxDist, y: fromY + dirY * maxDist };
+        const steps = Math.max(1, Math.round(maxDist / 10));
+        let best = { x: fromX, y: fromY };
+        for (let i = 1; i <= steps; i++) {
+            const d = (i / steps) * maxDist;
+            const cx = fromX + dirX * d, cy = fromY + dirY * d;
+            if (dungeon.isWalkable(cx, cy, radius)) best = { x: cx, y: cy };
+            else break;
+        }
+        return best;
+    },
+
+    // Arranca un dash/salto animado (ver tick en updateRealtime): interpola
+    // player.x/y de start a end durante `durationMs`. `sweep:true` +
+    // `onHitEnemy` detecta enemigos tocados a lo largo del camino (una vez
+    // cada uno); `onComplete` corre al llegar (ej. el golpe de área del
+    // Guerrero al aterrizar).
+    startLeap(kind, endX, endY, durationMs, opts) {
+        const player = this.player;
+        this.leap = {
+            kind, startX: player.x, startY: player.y, endX, endY,
+            startAt: Date.now(), durationMs, hitSet: new Set(),
+            sweep: !!(opts && opts.sweep),
+            onHitEnemy: opts && opts.onHitEnemy,
+            onComplete: opts && opts.onComplete,
+        };
+    },
+
+    // Pícaro — Estocada Fantasma: ver RT_SKILL1_ABILITIES.picaro.
+    fireSkill1Picaro(cfg, dirX, dirY) {
+        this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
+        const dest = this.computeWalkableDestination(this.player.x, this.player.y, dirX, dirY, cfg.dashRange, this.player.radius);
+        const weapon = this.player.getCurrentWeapon();
+        const baseDmg = cfg.dmgBase * (weapon.tier ? weapon.tier.mult : 1) * (weapon.rarity ? weapon.rarity.mult : 1);
+        const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+        this.startLeap('picaro_dash', dest.x, dest.y, cfg.dashDurationMs, {
+            sweep: true,
+            onHitEnemy: (enemy) => {
+                // El bono de zona se evalúa en el momento del golpe (no al
+                // lanzar): la posición del jugador cambia frame a frame
+                // durante el dash (ver getPlayerZoneDamageBonusPercent).
+                const dmg = baseDmg * (1 + this.getPlayerZoneDamageBonusPercent());
+                const dealt = enemy.takeDamage(dmg, { flatPenetration });
+                this.spawnImpactFlash(enemy.x, enemy.y, cfg.color);
+                this.floatDamage(enemy, dealt, false);
+                if (!enemy.alive && !enemy._deathHandled) {
+                    enemy._deathHandled = true;
+                    this.skill1CooldownUntil = Math.max(Date.now(), this.skill1CooldownUntil - cfg.cdReductionPerKillMs);
+                    this.onEnemyDefeated(enemy);
+                }
+            },
+        });
+    },
+
+    // Guerrero — Salto Sísmico: ver RT_SKILL1_ABILITIES.guerrero.
+    fireSkill1Guerrero(cfg, dirX, dirY, aimDist) {
+        this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
+        // Cae donde apuntaba el mouse si estaba MÁS CERCA que el rango
+        // máximo (ver aimDist en fireSkill1) — no siempre salta al tope.
+        const jumpDist = Math.min(cfg.jumpRange, aimDist);
+        const dest = this.computeWalkableDestination(this.player.x, this.player.y, dirX, dirY, jumpDist, this.player.radius);
+        this.startLeap('guerrero_jump', dest.x, dest.y, cfg.jumpDurationMs, {
+            onComplete: () => {
+                // La zona se crea ANTES de calcular el golpe de aterrizaje:
+                // el jugador cae justo en el centro, así que su propio
+                // impacto también se beneficia del +25% (ver
+                // getPlayerZoneDamageBonusPercent).
+                this.zones.push({ kind: 'guerrero_vuln', x: dest.x, y: dest.y, radius: cfg.slamRadius, dmgBonusPercent: cfg.zoneDmgBonusPercent, createdAt: Date.now(), expiresAt: Date.now() + cfg.zoneDurationMs, color: cfg.color });
+
+                const weapon = this.player.getCurrentWeapon();
+                let dmg = cfg.dmgBase * (weapon.tier ? weapon.tier.mult : 1) * (weapon.rarity ? weapon.rarity.mult : 1);
+                dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+                const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+                const targets = this.getEnemiesInCircle(dest.x, dest.y, cfg.slamRadius);
+                targets.forEach(t => {
+                    const dealt = t.takeDamage(dmg, { flatPenetration });
+                    this.spawnImpactFlash(t.x, t.y, cfg.color);
+                    this.floatDamage(t, dealt, false);
+                    if (!t.alive && !t._deathHandled) { t._deathHandled = true; this.onEnemyDefeated(t); }
+                });
+                this.effects.push({ kind: 'circle', x: dest.x, y: dest.y, followPlayer: false, range: cfg.slamRadius, startRange: 0, color: cfg.color, createdAt: Date.now(), duration: 300 });
+            },
+        });
+    },
+
+    // Bárbaro — Furia Sangrienta: primera pulsación (ver startAimSkill1).
+    activateBarbaroFury() {
+        const cfg = RT_SKILL1_ABILITIES.barbaro;
+        this.skill1.barbaroActive = true;
+        this.skill1.barbaroActiveUntil = Date.now() + cfg.baseDurationMs;
+        if (this.spawnFloatingText) {
+            this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `${cfg.emoji} ${cfg.name} activada`, cfg.color);
+        }
+    },
+
+    // Bárbaro — dash de cancelación (segunda pulsación, con el aura ya
+    // activa): ver RT_SKILL1_ABILITIES.barbaro/getBarbaroDashDamage.
+    fireSkill1BarbaroDash(cfg, dirX, dirY) {
+        this.skill1.barbaroActive = false;
+        this.skill1CooldownUntil = Date.now() + cfg.cancelCooldownMs;
+        const dest = this.computeWalkableDestination(this.player.x, this.player.y, dirX, dirY, cfg.dashRange, this.player.radius);
+        const hpPercent = this.player.hp / this.player.maxHp;
+        const baseDmg = getBarbaroDashDamage(hpPercent);
+        const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+        this.startLeap('barbaro_dash', dest.x, dest.y, cfg.dashDurationMs, {
+            sweep: true,
+            onHitEnemy: (enemy) => {
+                const dmg = baseDmg * (1 + this.getPlayerZoneDamageBonusPercent());
+                const dealt = enemy.takeDamage(dmg, { flatPenetration });
+                this.spawnImpactFlash(enemy.x, enemy.y, cfg.color);
+                this.floatDamage(enemy, dealt, false);
+                if (!enemy.alive && !enemy._deathHandled) {
+                    enemy._deathHandled = true;
+                    this.player.heal(this.player.maxHp * cfg.dashKillHealPercent);
+                    this.onEnemyDefeated(enemy);
+                }
+            },
+        });
+    },
+
+    // Tanque — Bastión: círculo estático en la posición actual del jugador
+    // al soltar "1" (ver RT_SKILL1_ABILITIES.tanque).
+    fireSkill1Tanque(cfg) {
+        this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
+        this.zones.push({
+            kind: 'tanque_bastion', x: this.player.x, y: this.player.y, radius: cfg.radius,
+            allyDefBonusPercent: cfg.allyDefenseBonusPercent, enemyDmgReducePercent: cfg.enemyDamageReducePercent,
+            createdAt: Date.now(), expiresAt: Date.now() + cfg.durationMs, color: cfg.color,
+        });
+        this.effects.push({ kind: 'circle', x: this.player.x, y: this.player.y, followPlayer: false, range: cfg.radius, startRange: cfg.radius * 0.9, color: cfg.color, createdAt: Date.now(), duration: 300 });
+    },
+
+    // Mago — Parpadeo Arcano: teletransporte instantáneo, sin animación de
+    // vuelo (ver RT_SKILL1_ABILITIES.mago).
+    fireSkill1Mago(cfg, dirX, dirY, aimDist) {
+        this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
+        // Se teletransporta hasta donde apuntaba el mouse si estaba MÁS
+        // CERCA que el rango máximo (ver aimDist en fireSkill1) — no
+        // siempre salta al tope.
+        const teleportDist = Math.min(cfg.teleportRange, aimDist);
+        const dest = this.computeWalkableDestination(this.player.x, this.player.y, dirX, dirY, teleportDist, this.player.radius);
+        this.player.x = dest.x;
+        this.player.y = dest.y;
+        this.skill1.mageDmgBuffUntil = Date.now() + cfg.dmgBuffDurationMs;
+        this.effects.push({ kind: 'flash', x: dest.x, y: dest.y, color: cfg.color, createdAt: Date.now(), duration: 300 });
+        if (this.spawnFloatingText) {
+            this.spawnFloatingText(dest.x, dest.y - this.player.radius - 20, `+${Math.round(cfg.dmgBuffPercent * 100)}% daño`, cfg.color, 1000);
+        }
+    },
+
+    // Arquero — Retirada Certera: salto hacia atrás (opuesto al mouse) +
+    // ataque frontal (misma geometría del Ataque 1) que ralentiza en vez de
+    // solo dañar, + velocidad de movimiento temporal (ver
+    // RT_SKILL1_ABILITIES.arquero).
+    fireSkill1Arquero(cfg, dirX, dirY) {
+        this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
+        this.skill1.archerSpeedBuffUntil = Date.now() + cfg.speedBuffDurationMs;
+
+        const geometry = getAttackGeometry('arquero', 0);
+        const targets = this.getEnemiesInCone(this.player.x, this.player.y, dirX, dirY, geometry.range, geometry.angle);
+        this.spawnAttackEffect(0, dirX, dirY, geometry);
+        const weaponAttacks = this.getActiveWeaponAttacks();
+        const atk = weaponAttacks ? weaponAttacks.basic[0] : null;
+        if (atk) {
+            const eff = this.player.getActiveEnchantEffects();
+            const potenciaMult = 1 + this.player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
+            const dmg = atk.damage * potenciaMult * (1 + eff.dmgBonusPercent) * (1 + this.getPlayerZoneDamageBonusPercent());
+            const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+            targets.forEach(t => {
+                const dealt = t.takeDamage(dmg, { flatPenetration });
+                this.spawnImpactFlash(t.x, t.y, cfg.color);
+                this.floatDamage(t, dealt, false);
+                t.speedMod = { percent: cfg.slowPercent, expiresAt: Date.now() + cfg.slowDurationMs };
+                if (!t.alive && !t._deathHandled) { t._deathHandled = true; this.onEnemyDefeated(t); }
+            });
+        }
+
+        const dest = this.computeWalkableDestination(this.player.x, this.player.y, -dirX, -dirY, cfg.jumpRange, this.player.radius);
+        this.startLeap('arquero_jump', dest.x, dest.y, cfg.jumpDurationMs, {});
+    },
+
+    // ----- BONOS/DEBUFFS DEL HECHIZO DE TECLA "1" (ver RT_SKILL1_ABILITIES) -----
+    // +25% de daño de SALIDA del jugador mientras esté parado dentro de la
+    // zona del Salto Sísmico del Guerrero — no importa dónde estén los
+    // enemigos, solo dónde está el jugador (ver fireSkill1Guerrero). Se
+    // suma a `dmg` en cada sitio donde el jugador calcula daño (mismo
+    // patrón que getSkill1DamageBuffPercent del Mago, pero por posición en
+    // vez de por timestamp).
+    getPlayerZoneDamageBonusPercent() {
+        if (!this.player) return 0;
+        let bonus = 0;
+        const now = Date.now();
+        this.zones.forEach(z => {
+            if (z.kind !== 'guerrero_vuln' || now >= z.expiresAt) return;
+            if (Math.hypot(this.player.x - z.x, this.player.y - z.y) <= z.radius) bonus += z.dmgBonusPercent;
+        });
+        return bonus;
+    },
+
+    // Multiplicador de daño de ATAQUE de un enemigo por el Bastión del
+    // Tanque (-30% mientras esté parado adentro) — llamado desde
+    // performEnemyAttackRT.
+    getEnemyZoneDamageMultiplier(enemy) {
+        let mult = 1;
+        const now = Date.now();
+        this.zones.forEach(z => {
+            if (z.kind !== 'tanque_bastion' || now >= z.expiresAt) return;
+            if (Math.hypot(enemy.x - z.x, enemy.y - z.y) <= z.radius) mult *= (1 - z.enemyDmgReducePercent);
+        });
+        return Math.max(0, mult);
+    },
+
+    // +50% de mitigación de armadura mientras el jugador esté parado dentro
+    // de un Bastión activo (el suyo, es el único jugador) — llamado desde
+    // Player.takeDamage.
+    getPlayerZoneDefenseBonusPercent() {
+        if (!this.player) return 0;
+        let bonus = 0;
+        const now = Date.now();
+        this.zones.forEach(z => {
+            if (z.kind !== 'tanque_bastion' || now >= z.expiresAt) return;
+            if (Math.hypot(this.player.x - z.x, this.player.y - z.y) <= z.radius) bonus += z.allyDefBonusPercent;
+        });
+        return bonus;
+    },
+
+    // Mago: +20% de daño temporal tras Parpadeo Arcano — 0 si no aplica.
+    getSkill1DamageBuffPercent(profId) {
+        if (profId === 'mago' && Date.now() < this.skill1.mageDmgBuffUntil) return RT_SKILL1_ABILITIES.mago.dmgBuffPercent;
+        return 0;
+    },
+
+    // Arquero: +20% de velocidad temporal tras Retirada Certera — 0 si no aplica.
+    getSkill1SpeedBonusPercent(profId) {
+        if (profId === 'arquero' && Date.now() < this.skill1.archerSpeedBuffUntil) return RT_SKILL1_ABILITIES.arquero.speedBuffPercent;
+        return 0;
+    },
+
+    // Bárbaro: +20% de robo de vida mientras Furia Sangrienta esté activa — 0 si no aplica.
+    getSkill1LifestealBonusPercent(profId) {
+        if (profId === 'barbaro' && this.skill1.barbaroActive) return RT_SKILL1_ABILITIES.barbaro.lifestealPercent;
+        return 0;
+    },
+
+    // Vista previa mientras se mantiene "1" (ver startAimSkill1): línea de
+    // dirección + círculo de destino/área, según la clase — llamado desde
+    // game.js/render() con la posición de mouse más reciente.
+    renderSkill1Aim(ctx, aimWorldPos) {
+        if (!this.skill1.aiming || !this.player) return;
+        const profId = this.player.activeProfession;
+        const cfg = RT_SKILL1_ABILITIES[profId];
+        if (!cfg) return;
+        const player = this.player;
+
+        let dirX = 0, dirY = -1, aimDist = Infinity;
+        if (aimWorldPos) {
+            dirX = aimWorldPos.x - player.x; dirY = aimWorldPos.y - player.y;
+            aimDist = Math.hypot(dirX, dirY);
+            const len = aimDist || 1;
+            dirX /= len; dirY /= len;
+        }
+
+        const drawLine = (dx, dy, dist, color) => {
+            ctx.beginPath();
+            ctx.moveTo(player.x, player.y);
+            ctx.lineTo(player.x + dx * dist, player.y + dy * dist);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 6]);
+            ctx.globalAlpha = 0.85;
+            ctx.stroke();
+            ctx.setLineDash([]);
+            ctx.globalAlpha = 1;
+        };
+        const drawPreviewCircle = (cx, cy, r, color) => {
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = 0.6;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.globalAlpha = 0.12;
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        };
+
+        if (profId === 'picaro') {
+            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, cfg.dashRange, player.radius);
+            drawLine(dirX, dirY, Math.hypot(dest.x - player.x, dest.y - player.y), cfg.color);
+        } else if (profId === 'guerrero') {
+            const jumpDist = Math.min(cfg.jumpRange, aimDist);
+            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, jumpDist, player.radius);
+            drawLine(dirX, dirY, Math.hypot(dest.x - player.x, dest.y - player.y), cfg.color);
+            drawPreviewCircle(dest.x, dest.y, cfg.slamRadius, cfg.color);
+        } else if (profId === 'barbaro') {
+            // Solo se llega acá con el aura YA activa (ver startAimSkill1) —
+            // vista previa del dash de cancelación.
+            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, cfg.dashRange, player.radius);
+            drawLine(dirX, dirY, Math.hypot(dest.x - player.x, dest.y - player.y), cfg.color);
+        } else if (profId === 'tanque') {
+            drawPreviewCircle(player.x, player.y, cfg.radius, cfg.color);
+        } else if (profId === 'mago') {
+            const teleportDist = Math.min(cfg.teleportRange, aimDist);
+            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, teleportDist, player.radius);
+            drawLine(dirX, dirY, Math.hypot(dest.x - player.x, dest.y - player.y), cfg.color);
+            drawPreviewCircle(dest.x, dest.y, player.radius, cfg.color);
+        } else if (profId === 'arquero') {
+            const geometry = getAttackGeometry('arquero', 0);
+            drawLine(dirX, dirY, geometry.range, cfg.color);
+            const backDest = this.computeWalkableDestination(player.x, player.y, -dirX, -dirY, cfg.jumpRange, player.radius);
+            drawPreviewCircle(backDest.x, backDest.y, player.radius, cfg.color);
+        }
+    },
+
+    // Zonas persistentes en el suelo (Salto Sísmico del Guerrero / Bastión
+    // del Tanque) + aura del Bárbaro mientras Furia Sangrienta esté activa —
+    // llamado desde game.js/render(), dentro del translate de cámara.
+    renderSkill1(ctx) {
+        const now = Date.now();
+        this.zones.forEach(z => {
+            if (now >= z.expiresAt) return;
+            ctx.beginPath();
+            ctx.arc(z.x, z.y, z.radius, 0, Math.PI * 2);
+            ctx.globalAlpha = 0.35;
+            ctx.strokeStyle = z.color;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.globalAlpha = 0.08;
+            ctx.fillStyle = z.color;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        });
+        if (this.skill1.barbaroActive && this.player) {
+            const cfg = RT_SKILL1_ABILITIES.barbaro;
+            ctx.beginPath();
+            ctx.arc(this.player.x, this.player.y, cfg.auraRadius, 0, Math.PI * 2);
+            ctx.globalAlpha = 0.5;
+            ctx.strokeStyle = cfg.color;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }
+    },
+
+    // ----- HECHIZO DE TECLA "3" (ver RT_SKILL3_ABILITIES) -----
+    // Mismo patrón que la tecla "1": mantener "3" entra en modo "apuntando"
+    // (dibuja línea guía, ver renderSkill3Aim), soltarla lo lanza hacia
+    // donde apuntaba el mouse en ese instante. No-opea si la clase activa
+    // todavía no tiene una entrada en RT_SKILL3_ABILITIES.
+    startAimSkill3() {
+        if (!this.player || this.player.hp <= 0) return;
+        const profId = this.player.activeProfession;
+        if (!RT_SKILL3_ABILITIES[profId]) return;
+        if (Date.now() < this.skill3CooldownUntil) return;
+        this.skill3.aiming = true;
+    },
+
+    cancelAimSkill3() {
+        this.skill3.aiming = false;
+    },
+
+    releaseSkill3(aimWorldPos) {
+        if (!this.skill3.aiming) return;
+        this.skill3.aiming = false;
+        this.fireSkill3(aimWorldPos);
+    },
+
+    fireSkill3(aimWorldPos) {
+        if (!this.player || this.player.hp <= 0) return;
+        const profId = this.player.activeProfession;
+        const cfg = RT_SKILL3_ABILITIES[profId];
+        if (!cfg) return;
+
+        let dirX = 0, dirY = -1, aimDist = Infinity;
+        if (aimWorldPos) {
+            dirX = aimWorldPos.x - this.player.x;
+            dirY = aimWorldPos.y - this.player.y;
+            aimDist = Math.hypot(dirX, dirY);
+            const len = aimDist || 1;
+            dirX /= len; dirY /= len;
+        }
+
+        if (profId === 'mago') this.fireSkill3MagoVortex(cfg, dirX, dirY, aimDist);
+    },
+
+    // Mago — Vórtice Arcano: ver RT_SKILL3_ABILITIES.mago para la fórmula
+    // de crecimiento/velocidad. `aimDist` (distancia real al mouse, ver
+    // fireSkill3) determina cuánto viaja realmente el vórtice — no siempre
+    // llega al máximo, igual que el salto/teletransporte de la tecla "1".
+    fireSkill3MagoVortex(cfg, dirX, dirY, aimDist) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        const player = this.player;
+        const aimedDist = Math.min(cfg.maxTravelDist, aimDist);
+        // Radio pequeño y fijo (no el del jugador) para el chequeo de
+        // paredes: el vórtice es un proyectil, no un dash del propio jugador.
+        const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, aimedDist, 10);
+        const actualTravelDist = Math.hypot(dest.x - player.x, dest.y - player.y);
+        const finalRadius = cfg.minRadius + Math.max(0, (actualTravelDist - cfg.growthStartDist) / cfg.growthDivisor);
+        const travelDurationMs = Math.max(1, (actualTravelDist / cfg.travelSpeedPxPerSec) * 1000);
+
+        const weapon = player.getCurrentWeapon();
+        this.vortex = {
+            profId: 'mago', cfg,
+            startX: player.x, startY: player.y,
+            endX: dest.x, endY: dest.y,
+            x: player.x, y: player.y,
+            startAt: Date.now(), travelDurationMs,
+            currentRadius: cfg.minRadius, finalRadius,
+            phase: 'traveling', hitSet: new Set(),
+            staticUntil: 0, lastStaticTickAt: 0,
+            tierMult: weapon.tier ? weapon.tier.mult : 1,
+            rarityMult: weapon.rarity ? weapon.rarity.mult : 1,
+            rotationStartAt: Date.now(),
+        };
+    },
+
+    // Daño de un golpe del vórtice: escala con el arma equipada AL
+    // LANZARLO (tier.mult × rareza.mult, mismo patrón que el resto de
+    // hechizos) y con los bonos de daño del jugador EVALUADOS EN EL
+    // MOMENTO del golpe (buff de Parpadeo Arcano si sigue activo, zona del
+    // Salto Sísmico si el jugador está parado en ella ahora) — igual que el
+    // dash del Pícaro/Bárbaro.
+    computeVortexDamage(vortex, baseDamage) {
+        let dmg = baseDamage * vortex.tierMult * vortex.rarityMult;
+        dmg *= (1 + this.getSkill1DamageBuffPercent(vortex.profId));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        return dmg;
+    },
+
+    // Vista previa mientras se mantiene "3" (ver startAimSkill3): línea
+    // guía hacia donde se lanzaría el hechizo — llamado desde game.js/
+    // render() con la posición de mouse más reciente, mismo patrón que
+    // renderSkill1Aim. Por ahora solo dibuja la línea (largo = distancia
+    // REAL que recorrería, ya clampeada al rango máximo de la clase).
+    renderSkill3Aim(ctx, aimWorldPos) {
+        if (!this.skill3.aiming || !this.player) return;
+        const profId = this.player.activeProfession;
+        const cfg = RT_SKILL3_ABILITIES[profId];
+        if (!cfg) return;
+        const player = this.player;
+
+        let dirX = 0, dirY = -1, aimDist = Infinity;
+        if (aimWorldPos) {
+            dirX = aimWorldPos.x - player.x; dirY = aimWorldPos.y - player.y;
+            aimDist = Math.hypot(dirX, dirY);
+            const len = aimDist || 1;
+            dirX /= len; dirY /= len;
+        }
+
+        const maxRange = cfg.maxTravelDist || 0;
+        const lineDist = Math.min(maxRange, aimDist);
+        ctx.beginPath();
+        ctx.moveTo(player.x, player.y);
+        ctx.lineTo(player.x + dirX * lineDist, player.y + dirY * lineDist);
+        ctx.strokeStyle = cfg.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.globalAlpha = 0.85;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+    },
+
+    // Dibuja el Vórtice Arcano (llamado desde game.js/render(), dentro del
+    // translate de cámara): círculo externo relleno + borde + runas
+    // rotando en el borde (mismo glyph que los objetos orbitales del
+    // Ataque 2 del Mago, ver renderSkill2), más 1-2 anillos internos solo
+    // de borde según el radio actual (ver spec del pedido). Todos los
+    // anillos rotan, cada uno a su propia velocidad/dirección.
+    renderVortex(ctx) {
+        const v = this.vortex;
+        if (!v) return;
+        const cfg = v.cfg;
+        const elapsed = Date.now() - v.rotationStartAt;
+
+        const drawRing = (radius, filled, runes, revolutionMs, dirSign) => {
+            if (radius <= 0) return;
+            const angle = dirSign * ((elapsed % revolutionMs) / revolutionMs) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.arc(v.x, v.y, radius, 0, Math.PI * 2);
+            if (filled) {
+                ctx.globalAlpha = 0.18;
+                ctx.fillStyle = cfg.color;
+                ctx.fill();
+            }
+            ctx.globalAlpha = 0.9;
+            ctx.strokeStyle = cfg.color;
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+
+            if (runes) {
+                const runeCount = 8;
+                for (let i = 0; i < runeCount; i++) {
+                    const a = angle + (i / runeCount) * Math.PI * 2;
+                    const ox = v.x + Math.cos(a) * radius;
+                    const oy = v.y + Math.sin(a) * radius;
+                    ctx.save();
+                    ctx.translate(ox, oy);
+                    ctx.rotate(a);
+                    ctx.globalAlpha = 0.9;
+                    ctx.fillStyle = cfg.color;
+                    ctx.shadowColor = cfg.color;
+                    ctx.shadowBlur = 6;
+                    ctx.beginPath();
+                    ctx.moveTo(-3, -8);
+                    ctx.lineTo(3, -8);
+                    ctx.lineTo(1.5, 8);
+                    ctx.lineTo(-1.5, 8);
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.restore();
+                }
+                ctx.shadowBlur = 0;
+            }
+        };
+
+        const R = v.currentRadius;
+        if (R >= 130) {
+            drawRing(R, true, true, 3000, 1);          // externo: runas, rápido
+            drawRing(R * 0.7, false, false, 6000, -1); // medio 70%: el más lento, dirección opuesta
+            drawRing(R * 0.5, false, false, 1500, 1);  // interno 50%: rápido, misma dirección que el externo
+        } else if (R >= 70) {
+            drawRing(R, true, true, 3000, 1);
+            drawRing(R * 0.6, false, false, 1500, -1); // interno 60%: rápido, dirección opuesta
+        } else {
+            drawRing(R, true, true, 3000, 1);
+        }
+    },
+
     // Enemigos dentro de un cono frontal (usado por Ataque 1/2).
     getEnemiesInCone(originX, originY, dirX, dirY, range, angleDeg) {
         const halfAngleRad = (angleDeg / 2) * Math.PI / 180;
@@ -479,6 +1215,12 @@ const Combat = {
         // Guerrero/Mago: +daño% por stack de su habilidad toggle activa
         // (ver RT_TOGGLE_SKILLS.dmgPctPerStack/dmgPctMax) — 0 si no aplica.
         dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
+        // Mago: +20% de daño temporal tras lanzar Parpadeo Arcano (ver
+        // RT_SKILL1_ABILITIES.mago) — 0 si no aplica.
+        dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
+        // +25% mientras el jugador esté parado en la zona del Salto Sísmico
+        // del Guerrero (ver RT_SKILL1_ABILITIES.guerrero) — 0 si no aplica.
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
 
         const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
@@ -498,9 +1240,11 @@ const Combat = {
         if (hitLanded && atk.consumesClassCharge) chargeConsumed = this.classChargeConsume(profId);
 
         // Bárbaro: +robo de vida% por stack de su habilidad toggle activa
-        // (ver RT_TOGGLE_SKILLS.lifestealPctPerStack/lifestealPctMax) — 0 si
-        // no aplica; se suma a lo que gane la rama `barbaro` más abajo.
-        let extraLifestealPercent = this.getSkill2LifestealBonusPercent(profId);
+        // (ver RT_TOGGLE_SKILLS.lifestealPctPerStack/lifestealPctMax) y +20%
+        // fijo mientras Furia Sangrienta esté activa (ver
+        // RT_SKILL1_ABILITIES.barbaro) — 0 si no aplica; se suma a lo que
+        // gane la rama `barbaro` más abajo.
+        let extraLifestealPercent = this.getSkill2LifestealBonusPercent(profId) + this.getSkill1LifestealBonusPercent(profId);
         let classNote = '';
 
         if (profId === 'guerrero' && atk.consumesClassCharge) {
@@ -995,6 +1739,9 @@ const Combat = {
             baseDmg = Math.max(1, baseDmg - enemy.attackMod.flat);
         }
         if (enemy.type.ability === 'damageMultiplier') baseDmg = Math.round(baseDmg * 1.6);
+        // Bastión del Tanque (ver RT_SKILL1_ABILITIES.tanque): -30% de daño
+        // mientras el enemigo esté parado dentro del círculo.
+        baseDmg = Math.round(baseDmg * this.getEnemyZoneDamageMultiplier(enemy));
 
         const player = this.player;
         const shield = player.shield;
@@ -1156,6 +1903,15 @@ const Combat = {
         // mientras está activa, sin importar qué lo mató (golpe, DoT, etc.).
         if (this.skill2.active) {
             this.skill2.stacks = Math.min(RT_TOGGLE_STACK_MAX, this.skill2.stacks + 1);
+        }
+
+        // Furia Sangrienta del Bárbaro (ver RT_SKILL1_ABILITIES.barbaro):
+        // cada muerte mientras está activa cura 5% de vida máxima y extiende
+        // la duración +1s, sin importar qué la mató.
+        if (this.skill1.barbaroActive && player.activeProfession === 'barbaro') {
+            const cfg = RT_SKILL1_ABILITIES.barbaro;
+            player.heal(player.maxHp * cfg.killHealPercent);
+            this.skill1.barbaroActiveUntil += cfg.durationPerKillMs;
         }
 
         // Tamaño de "grupo": enemigos vivos cerca del que acaba de morir,

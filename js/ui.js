@@ -1138,6 +1138,55 @@ const UI = {
             }
         }
 
+        // Hechizo de tecla "1" (ver RT_SKILL1_ABILITIES/Combat.skill1): el
+        // círculo muestra el cooldown normal, EXCEPTO para Bárbaro mientras
+        // Furia Sangrienta está activa, donde en vez de cooldown se muestra
+        // el tiempo restante del aura (ver activateBarbaroFury).
+        const skill1Cfg = RT_SKILL1_ABILITIES[player.activeProfession];
+        const circle3 = document.getElementById('cd-circle-3');
+        const timer3 = document.getElementById('cd-timer-3');
+        if (circle3 && timer3) {
+            const barbaroActive = player.activeProfession === 'barbaro' && Combat.skill1.barbaroActive;
+            if (barbaroActive) {
+                const remaining = Math.max(0, Combat.skill1.barbaroActiveUntil - now);
+                circle3.classList.remove('ready');
+                circle3.classList.add('toggle-active');
+                circle3.style.borderColor = skill1Cfg ? skill1Cfg.color : '';
+                circle3.style.setProperty('--cd-pct', '0deg');
+                timer3.textContent = (remaining / 1000).toFixed(1);
+            } else {
+                const total = skill1Cfg ? skill1Cfg.cooldownMs : 1;
+                const remaining = Math.max(0, Combat.skill1CooldownUntil - now);
+                const pct = total > 0 ? Math.min(1, remaining / total) : 0;
+                circle3.classList.toggle('ready', remaining <= 0);
+                circle3.classList.remove('toggle-active');
+                circle3.style.borderColor = '';
+                circle3.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
+                timer3.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '✓';
+            }
+        }
+
+        // Hechizo de tecla "3" (ver RT_SKILL3_ABILITIES/Combat.skill3CooldownUntil):
+        // solo la clase con entrada ahí tiene algo que mostrar — las demás
+        // quedan grises/vacías hasta que se les agregue la suya.
+        const skill3Cfg = RT_SKILL3_ABILITIES[player.activeProfession];
+        const circle4 = document.getElementById('cd-circle-4');
+        const timer4 = document.getElementById('cd-timer-4');
+        if (circle4 && timer4) {
+            if (!skill3Cfg) {
+                circle4.classList.remove('ready');
+                circle4.style.setProperty('--cd-pct', '0deg');
+                timer4.textContent = '—';
+            } else {
+                const total = skill3Cfg.cooldownMs;
+                const remaining = Math.max(0, Combat.skill3CooldownUntil - now);
+                const pct = total > 0 ? Math.min(1, remaining / total) : 0;
+                circle4.classList.toggle('ready', remaining <= 0);
+                circle4.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
+                timer4.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '✓';
+            }
+        }
+
         const chargePct = Math.min(100, (Combat.charge / RT_CHARGE_MAX) * 100);
         const chargeFill = document.getElementById('charge-bar-fill');
         if (chargeFill) chargeFill.style.width = `${chargePct}%`;
@@ -1160,6 +1209,49 @@ const UI = {
                     skill2StatusEl.textContent = cdRemaining > 0
                         ? `${toggleCfg.emoji} ${toggleCfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
                         : `${toggleCfg.emoji} ${toggleCfg.name}: click derecho para activar`;
+                }
+            }
+        }
+
+        // Estado del hechizo de tecla "1" (nombre + ACTIVA/apuntando/
+        // cooldown restante), ver RT_SKILL1_ABILITIES.
+        const skill1StatusEl = document.getElementById('skill1-status');
+        if (skill1StatusEl) {
+            if (!skill1Cfg) {
+                skill1StatusEl.classList.add('hidden');
+            } else {
+                skill1StatusEl.classList.remove('hidden');
+                const barbaroActive = player.activeProfession === 'barbaro' && Combat.skill1.barbaroActive;
+                if (barbaroActive) {
+                    const remaining = Math.max(0, Combat.skill1.barbaroActiveUntil - now);
+                    skill1StatusEl.innerHTML = `${skill1Cfg.emoji} ${skill1Cfg.name}: <span style="color:${skill1Cfg.color}">ACTIVA</span> (${(remaining / 1000).toFixed(1)}s · [1] para cancelar con dash)`;
+                } else if (Combat.skill1.aiming) {
+                    skill1StatusEl.innerHTML = `${skill1Cfg.emoji} ${skill1Cfg.name}: <span style="color:${skill1Cfg.color}">apuntando...</span>`;
+                } else {
+                    const cdRemaining = Math.max(0, Combat.skill1CooldownUntil - now);
+                    skill1StatusEl.textContent = cdRemaining > 0
+                        ? `${skill1Cfg.emoji} ${skill1Cfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
+                        : `${skill1Cfg.emoji} ${skill1Cfg.name}: [1] para usar`;
+                }
+            }
+        }
+
+        // Estado del hechizo de tecla "3" (nombre + apuntando/cooldown
+        // restante), ver RT_SKILL3_ABILITIES — oculto para clases que
+        // todavía no tienen ninguno ahí.
+        const skill3StatusEl = document.getElementById('skill3-status');
+        if (skill3StatusEl) {
+            if (!skill3Cfg) {
+                skill3StatusEl.classList.add('hidden');
+            } else {
+                skill3StatusEl.classList.remove('hidden');
+                if (Combat.skill3.aiming) {
+                    skill3StatusEl.innerHTML = `${skill3Cfg.emoji} ${skill3Cfg.name}: <span style="color:${skill3Cfg.color}">apuntando...</span>`;
+                } else {
+                    const cdRemaining = Math.max(0, Combat.skill3CooldownUntil - now);
+                    skill3StatusEl.textContent = cdRemaining > 0
+                        ? `${skill3Cfg.emoji} ${skill3Cfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
+                        : `${skill3Cfg.emoji} ${skill3Cfg.name}: [3] para usar`;
                 }
             }
         }
@@ -1219,6 +1311,42 @@ const UI = {
                 }
             }
         }
+        // Efectos activos del hechizo de tecla "1" (ver RT_SKILL1_ABILITIES):
+        // los bonos temporales sobre el jugador (Bárbaro/Mago/Arquero) y la
+        // mitigación extra del Tanque mientras esté parado en su propio
+        // Bastión (no depende de tener a Tanque como clase activa — el
+        // círculo ya existe aunque el jugador cambie de clase después).
+        if (Combat.skill1.barbaroActive && profId === 'barbaro') {
+            const cfg = RT_SKILL1_ABILITIES.barbaro;
+            const remaining = Math.max(0, Combat.skill1.barbaroActiveUntil - Date.now());
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(cfg.lifestealPercent * 100)}% robo de vida (${(remaining / 1000).toFixed(1)}s)` });
+        }
+        const skill1DmgBuff = Combat.getSkill1DamageBuffPercent(profId);
+        if (skill1DmgBuff > 0) {
+            const cfg = RT_SKILL1_ABILITIES.mago;
+            const remaining = Math.max(0, Combat.skill1.mageDmgBuffUntil - Date.now());
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill1DmgBuff * 100)}% daño (${(remaining / 1000).toFixed(1)}s)` });
+        }
+        const skill1SpeedBuff = Combat.getSkill1SpeedBonusPercent(profId);
+        if (skill1SpeedBuff > 0) {
+            const cfg = RT_SKILL1_ABILITIES.arquero;
+            const remaining = Math.max(0, Combat.skill1.archerSpeedBuffUntil - Date.now());
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill1SpeedBuff * 100)}% velocidad (${(remaining / 1000).toFixed(1)}s)` });
+        }
+        const skill1TanqueDef = Combat.getPlayerZoneDefenseBonusPercent();
+        if (skill1TanqueDef > 0) {
+            const cfg = RT_SKILL1_ABILITIES.tanque;
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill1TanqueDef * 100)}% mitigación (Bastión)` });
+        }
+        // Zona del Salto Sísmico del Guerrero: +25% de daño DE SALIDA del
+        // jugador mientras esté parado adentro (no importa dónde estén los
+        // enemigos) — mismo patrón que la mitigación del Bastión de arriba.
+        const skill1GuerreroDmg = Combat.getPlayerZoneDamageBonusPercent();
+        if (skill1GuerreroDmg > 0) {
+            const cfg = RT_SKILL1_ABILITIES.guerrero;
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill1GuerreroDmg * 100)}% daño (Salto Sísmico)` });
+        }
+
         if (player.shield && player.shield.amount > 0) {
             lines.push({ color: '#8ec0ff', text: `🛡️ Escudo +${Math.round(player.shield.amount)} HP` });
         }

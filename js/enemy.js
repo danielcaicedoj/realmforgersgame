@@ -158,6 +158,7 @@ class Enemy {
         this.stunUntil = 0;      // Date.now() hasta el cual no se mueve ni ataca
         this.defenseMod = null;  // { percent, flat, expiresAt }
         this.attackMod = null;   // { flat, expiresAt }
+        this.speedMod = null;    // { percent, expiresAt } — ralentización (ver Retirada Certera del Arquero, RT_SKILL1_ABILITIES)
 
         // Estado de habilidad de jefe (ver Combat.tickBossAbility): contador
         // de ataques propios desde el último uso (reemplaza "turnos desde
@@ -217,6 +218,7 @@ class Enemy {
         });
         if (this.defenseMod && now >= this.defenseMod.expiresAt) this.defenseMod = null;
         if (this.attackMod && now >= this.attackMod.expiresAt) this.attackMod = null;
+        if (this.speedMod && now >= this.speedMod.expiresAt) this.speedMod = null;
     }
 
     // Movimiento + estado de IA. No dispara el ataque en sí (eso lo hace
@@ -299,7 +301,8 @@ class Enemy {
     stepToward(targetX, targetY, dt, dungeon) {
         const dirX = targetX - this.x, dirY = targetY - this.y;
         const len = Math.hypot(dirX, dirY) || 1;
-        const step = this.speed * (dt / 16);
+        const speedPenalty = (this.speedMod && Date.now() < this.speedMod.expiresAt) ? this.speedMod.percent : 0;
+        const step = this.speed * (1 - speedPenalty) * (dt / 16);
         const nx = this.x + (dirX / len) * step;
         const ny = this.y + (dirY / len) * step;
         if (!dungeon || dungeon.isWalkable(nx, this.y, this.radius)) this.x = nx;

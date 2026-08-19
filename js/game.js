@@ -48,15 +48,14 @@
     const keys = new Set();
     const MOVE_KEYS = ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'];
 
-    // Ataque 1 (tecla "1" O click izquierdo, ver bindInput): mientras
-    // cualquiera de los dos esté presionado, update() dispara
-    // Combat.tryAttack(0, ...) cada frame — tryAttack ya no-opea sola si
-    // sigue en cooldown, así que esto reproduce "se dispara apenas termina
-    // el cooldown, se repite mientras se mantenga" sin necesitar un timer
-    // aparte. `lastAimWorldPos` es la posición del mouse más reciente
-    // (actualizada por mousemove/mousedown), usada como dirección de
-    // apuntado incluso si el disparo lo originó la tecla "1".
-    let attack1KeyHeld = false;
+    // Ataque 1 (SOLO click izquierdo — la tecla "1" quedó libre para el
+    // hechizo nuevo de clase, ver Combat.startAimSkill1/RT_SKILL1_ABILITIES):
+    // mientras se mantenga, update() dispara Combat.tryAttack(0, ...) cada
+    // frame — tryAttack ya no-opea sola si sigue en cooldown, así que esto
+    // reproduce "se dispara apenas termina el cooldown, se repite mientras
+    // se mantenga" sin necesitar un timer aparte. `lastAimWorldPos` es la
+    // posición del mouse más reciente (actualizada por mousemove/mousedown),
+    // también usada como dirección de apuntado del hechizo de tecla "1".
     let attack1MouseHeld = false;
     // null hasta el primer mousemove/mousedown — Combat.tryAttack ya
     // defaultea a "apuntar hacia arriba" cuando aimWorldPos es falsy (ver
@@ -1146,12 +1145,14 @@
         window.addEventListener('keydown', e => {
             const key = e.key.toLowerCase();
 
-            // Ataque 1: tecla "1" mantenida dispara en bucle igual que
-            // mantener click izquierdo (ver update()); e.repeat evita
-            // reiniciar el estado en cada tick de auto-repeat del SO.
+            // Hechizo de clase (tecla "1", ver RT_SKILL1_ABILITIES): entra
+            // en modo "apuntando" (dibuja vista previa, ver
+            // Combat.renderSkill1Aim) — soltarla lo lanza (ver keyup más
+            // abajo). e.repeat evita reiniciar el estado en cada tick de
+            // auto-repeat del SO.
             if (key === '1') {
                 e.preventDefault();
-                if (!e.repeat) attack1KeyHeld = true;
+                if (!e.repeat && !dead && !isAnyPanelOpen() && !inTaberna) Combat.startAimSkill1();
                 return;
             }
 
@@ -1163,20 +1164,14 @@
                 return;
             }
 
-            // Ataque 3 (especial): tecla "3" reemplaza a "R". Arquero es
-            // INSTANTÁNEO (dispara directo, sin el círculo de carga
-            // sostenida — corrección pedida explícitamente); el resto de
-            // las clases mantiene el mantener-presionado-para-cargar (ver
-            // Combat.startCharge). e.repeat evita reiniciar la carga/re-
-            // disparar en cada tick de auto-repeat del SO.
-            if (key === '3' && !dead) {
+            // Hechizo nuevo de clase (tecla "3", ver RT_SKILL3_ABILITIES):
+            // mismo patrón que la tecla "1" — mantener entra en modo
+            // "apuntando" (línea guía, ver Combat.renderSkill3Aim), soltar
+            // lanza (ver keyup más abajo). No-opea sola si la clase activa
+            // todavía no tiene una entrada ahí (se agregan de a una).
+            if (key === '3') {
                 e.preventDefault();
-                if (e.repeat) return;
-                if (player.activeProfession === 'arquero') {
-                    Combat.tryAttack(2, null);
-                } else {
-                    Combat.startCharge();
-                }
+                if (!e.repeat && !dead && !isAnyPanelOpen() && !inTaberna) Combat.startAimSkill3();
                 return;
             }
 
@@ -1186,15 +1181,24 @@
                 return;
             }
 
-            if (key === ' ') {
+            // Ataque 3 (especial): tecla Espacio (antes "3" — libre ahora
+            // para otra habilidad, ver RT_SKILL1_ABILITIES/tecla "1"). El
+            // interactuar con portal/cofre/nodo por teclado (antes en
+            // Espacio) queda cubierto por click directo sobre ellos (ver
+            // handleWorldClick), no se perdió funcionalidad, solo el atajo.
+            // Arquero es INSTANTÁNEO (dispara directo, sin el círculo de
+            // carga sostenida — corrección pedida explícitamente); el resto
+            // de las clases mantiene el mantener-presionado-para-cargar (ver
+            // Combat.startCharge). e.repeat evita reiniciar la carga/re-
+            // disparar en cada tick de auto-repeat del SO.
+            if (key === ' ' && !dead) {
                 e.preventDefault();
-                if (dead || isAnyPanelOpen()) return;
-                const portal = findNearestPortalInRange();
-                if (portal) { activatePortal(portal); return; }
-                const chest = findNearestChest();
-                if (chest) { startOpenChest(chest); return; }
-                const node = findNearestGatherNode();
-                if (node) startGather(node);
+                if (e.repeat) return;
+                if (player.activeProfession === 'arquero') {
+                    Combat.tryAttack(2, null);
+                } else {
+                    Combat.startCharge();
+                }
                 return;
             }
 
@@ -1226,8 +1230,9 @@
 
         window.addEventListener('keyup', e => {
             const key = e.key.toLowerCase();
-            if (key === '1') attack1KeyHeld = false;
-            if (key === '3') Combat.releaseCharge();
+            if (key === '1') Combat.releaseSkill1(lastAimWorldPos);
+            if (key === '3') Combat.releaseSkill3(lastAimWorldPos);
+            if (key === ' ') Combat.releaseCharge();
             keys.delete(key);
         });
 
@@ -1236,8 +1241,9 @@
         // sin esto, el ataque continuo quedaría "trabado" disparando al
         // volver. Ver "Cambio de Ventana" en la especificación.
         window.addEventListener('blur', () => {
-            attack1KeyHeld = false;
             attack1MouseHeld = false;
+            Combat.cancelAimSkill1();
+            Combat.cancelAimSkill3();
         });
     }
 
@@ -1288,8 +1294,9 @@
     function checkPlayerDeath() {
         if (dead || player.hp > 0) return;
         dead = true;
-        attack1KeyHeld = false;
         attack1MouseHeld = false;
+        Combat.cancelAimSkill1();
+        Combat.cancelAimSkill3();
         UI.showGameOver(true);
         player.save();
         UI.updateHUD(player);
@@ -1502,7 +1509,7 @@
             // ver bindInput): tryAttack ya no-opea sola si sigue en
             // cooldown, así que llamarla cada frame reproduce "dispara
             // apenas termina el cooldown, se repite mientras se mantenga".
-            if (attack1KeyHeld || attack1MouseHeld) Combat.tryAttack(0, lastAimWorldPos);
+            if (attack1MouseHeld) Combat.tryAttack(0, lastAimWorldPos);
         }
         checkPlayerDeath();
 
@@ -1529,7 +1536,7 @@
         UI.updateHUD(player);
         UI.updateBossCounter(player, inTaberna, finalBossAlive);
         UI.updateFinalBossNotification(player, inTaberna);
-        UI.updateCombatHUD(player, inTaberna, attack1KeyHeld || attack1MouseHeld);
+        UI.updateCombatHUD(player, inTaberna, attack1MouseHeld);
         UI.updateEffectsHUD(player);
         UI.showLevelToasts(player);
     }
@@ -1614,7 +1621,7 @@
 
     // Auras de estado (ver EFECTOS VISUALES GENERALES): un anillo por
     // efecto activo, dibujados en capas concéntricas si hay varios a la vez.
-    const STATUS_AURA_COLORS = { burn: 'rgba(255,92,92,0.75)', bleed: 'rgba(196,30,58,0.75)', stun: 'rgba(255,224,102,0.8)', defenseMod: 'rgba(150,120,255,0.7)' };
+    const STATUS_AURA_COLORS = { burn: 'rgba(255,92,92,0.75)', bleed: 'rgba(196,30,58,0.75)', stun: 'rgba(255,224,102,0.8)', defenseMod: 'rgba(150,120,255,0.7)', speedMod: 'rgba(160,224,255,0.75)' };
     function drawStatusAuras(en) {
         const now = Date.now();
         let ring = 0;
@@ -1630,6 +1637,7 @@
         if (en.bleed && now < en.bleed.expiresAt) draw('bleed');
         if (en.stunUntil > now) draw('stun');
         if (en.defenseMod && now < en.defenseMod.expiresAt) draw('defenseMod');
+        if (en.speedMod && now < en.speedMod.expiresAt) draw('speedMod');
     }
 
     function drawHealthBar(x, y, radius, pct, color) {
@@ -1792,6 +1800,7 @@
         if (inTaberna) drawTabernaDecor();
         drawPortals();
         chests.forEach(drawChest);
+        Combat.renderSkill1(ctx); // zonas del hechizo de tecla "1" (Salto Sísmico/Bastión) — bajo enemigos/jugador
 
         nodes.forEach(n => {
             if (n.depleted) return;
@@ -1813,6 +1822,9 @@
         drawPlayerEntity();
         Combat.renderEffects(ctx);
         Combat.renderSkill2(ctx);
+        Combat.renderSkill1Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "1" (línea/círculo)
+        Combat.renderSkill3Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "3" (línea guía)
+        Combat.renderVortex(ctx); // Vórtice Arcano del Mago (tecla "3")
         drawChargeRing();
 
         ctx.font = 'bold 14px sans-serif';

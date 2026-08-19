@@ -536,8 +536,10 @@ class Player {
         const mount = this.getEquippedMount();
         // Pícaro/Arquero: +velocidad% por stack de su habilidad toggle
         // activa (ver RT_TOGGLE_SKILLS.speedPctPerStack/speedPctMax en
-        // constants.js) — 0 si no aplica.
-        const skillSpeedBonus = Combat.getSkill2SpeedBonusPercent(this.activeProfession);
+        // constants.js) — 0 si no aplica. Arquero: +20% temporal al lanzar
+        // Retirada Certera (ver RT_SKILL1_ABILITIES.arquero/
+        // Combat.getSkill1SpeedBonusPercent) — 0 si no aplica.
+        const skillSpeedBonus = Combat.getSkill2SpeedBonusPercent(this.activeProfession) + Combat.getSkill1SpeedBonusPercent(this.activeProfession);
         return this.baseSpeed * (1 + (mount ? mount.speedPercent : 0) / 100) * (1 + skillSpeedBonus);
     }
 
@@ -857,7 +859,10 @@ class Player {
         // Tanque: +mitigación% por stack de su habilidad toggle activa (ver
         // RT_TOGGLE_SKILLS.defPctPerStack/defPctMax en constants.js) — 0 si
         // no aplica; multiplica la defensa EFECTIVA usada en la reducción.
-        const skillDefBonus = Combat.getSkill2DefenseBonusPercent(this.activeProfession);
+        // Tanque: +50% de mitigación mientras esté parado dentro de su
+        // propio Bastión (ver RT_SKILL1_ABILITIES.tanque/
+        // Combat.getPlayerZoneDefenseBonusPercent) — 0 si no aplica.
+        const skillDefBonus = Combat.getSkill2DefenseBonusPercent(this.activeProfession) + Combat.getPlayerZoneDefenseBonusPercent();
         dmg = Math.max(1, dmg - armor.defense * (1 + skillDefBonus) * 0.15);
 
         // Reducción de daño de encantamientos (ej. Fortaleza Marcial,

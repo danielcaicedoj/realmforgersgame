@@ -780,6 +780,150 @@ const RT_TOGGLE_SKILLS = {
     tanque:   { name: 'Círculo de Escudos', emoji: '🔨', objectCount: 6, radius: 180, orbitMs: 4000, activateCooldownMs: 3000, color: '#4169e1', dmgBase: 4, tickMs: 1000, defPctPerStack: 0.05, defPctMax: 0.50 },
 };
 
+// ----- ATAQUE 1 "NUEVO" (tecla "1"): hechizo único por clase -----
+// El Ataque 1 original (golpe básico) pasó a ser SOLO click izquierdo (ver
+// Combat.tryAttack/bindInput en game.js); la tecla "1" quedó libre y ahora
+// dispara este hechizo propio de cada clase. Mecánica de disparo compartida
+// por las 6 (ver Combat.startAimSkill1/releaseSkill1/fireSkill1): mantener
+// "1" entra en modo "apuntando" (dibuja línea/círculo de vista previa, ver
+// Combat.renderSkill1Aim), soltarla lanza el hechizo hacia la posición del
+// mouse en ese instante — EXCEPTO Bárbaro, cuya primera pulsación activa el
+// aura al instante (sin apuntado, es centrada en sí mismo) y solo la
+// segunda (con el aura ya activa) entra en modo apuntando, para el dash de
+// cancelación.
+// El daño base de cada hechizo escala con el arma equipada igual que
+// cualquier otro ataque (tier.mult × rareza.mult), mismo patrón que
+// RT_TOGGLE_SKILLS — los números de acá son el valor a Tier 1/Común pedido.
+// Distancias/duraciones/radios sí son fijos (no escalan con el arma).
+const RT_SKILL1_ABILITIES = {
+    // Pícaro — Estocada Fantasma: dash de 400px en 0.1s, daño a TODO enemigo
+    // tocado en el camino (barrido continuo durante la animación, no un
+    // golpe único). Cada enemigo QUE MUERE por el dash reduce el cooldown
+    // restante 0.3s (puede dejarlo listo de inmediato con varias bajas).
+    picaro: {
+        name: 'Estocada Fantasma', emoji: '🗡️', color: '#d0d0e8',
+        dashRange: 400, dashDurationMs: 100, dmgBase: 20, cooldownMs: 3000, cdReductionPerKillMs: 300,
+    },
+    // Guerrero — Salto Sísmico: salto de HASTA 300px en 0.1s (cae donde
+    // apuntaba el mouse si estaba más cerca que el rango máximo — no
+    // siempre salta al tope, ver fireSkill1Guerrero/aimDist) (sin daño en
+    // el aire); al aterrizar, golpe de área (radio 150) + zona que queda
+    // dibujada 5s: mientras el JUGADOR esté parado adentro (no importa
+    // dónde estén los enemigos), su daño de salida sube 25% contra
+    // cualquier objetivo (ver Combat.getPlayerZoneDamageBonusPercent).
+    guerrero: {
+        name: 'Salto Sísmico', emoji: '⚔️', color: '#ffd700',
+        jumpRange: 300, jumpDurationMs: 100, slamRadius: 150, dmgBase: 30, cooldownMs: 5000,
+        zoneDurationMs: 5000, zoneDmgBonusPercent: 0.25,
+    },
+    // Bárbaro — Furia Sangrienta: aura de 100px alrededor suyo (sigue al
+    // jugador, no queda fija), +20% robo de vida y +5% vida máxima curada
+    // por cada muerte mientras esté activa (cada muerte también extiende la
+    // duración +1s). Duración base 5s; el cooldown normal (5s) arranca
+    // recién CUANDO TERMINA (por tiempo, no al activarla). Puede cancelarse
+    // antes con una 2da pulsación de "1": en vez de esperar a que se acabe,
+    // hace un dash de 200px (0.1s) que daña según el % de vida ACTUAL del
+    // jugador al momento de lanzarlo (ver dashDmgTiers/getBarbaroDashDamage
+    // — tabla ordenada de mayor a menor: el primer umbral que cumple el %
+    // de vida actual define el daño) y cura 5% de vida máxima por cada
+    // enemigo que mate con él; cancelar así sube el cooldown a 7s en vez de
+    // los 5s normales (penalización por cortar el aura antes de tiempo).
+    barbaro: {
+        name: 'Furia Sangrienta', emoji: '🪓', color: '#8b0000',
+        auraRadius: 100, lifestealPercent: 0.20, killHealPercent: 0.05,
+        baseDurationMs: 5000, durationPerKillMs: 1000, cooldownMs: 5000,
+        dashRange: 200, dashDurationMs: 100, cancelCooldownMs: 7000, dashKillHealPercent: 0.05,
+        // El pedido original da 4 números (100-80%=10, 80-60%=15,
+        // 40-20%=20, 20-1%=25) pero deja un hueco en 60-40%: se rellenó
+        // extendiendo el tramo de 15 hasta 40% en vez de inventar un 5to
+        // valor no pedido — avisado al usuario, fácil de ajustar acá.
+        dashDmgTiers: [
+            { minHpPercent: 0.80, dmg: 10 },
+            { minHpPercent: 0.40, dmg: 15 },
+            { minHpPercent: 0.20, dmg: 20 },
+            { minHpPercent: 0, dmg: 25 },
+        ],
+    },
+    // Tanque — Bastión: círculo ESTÁTICO (no sigue al jugador) de 200px de
+    // radio en el punto donde se soltó "1". El jugador, mientras esté
+    // parado adentro, recibe +50% de mitigación de armadura (ver
+    // Combat.getPlayerZoneDefenseBonusPercent/Player.takeDamage); cualquier
+    // enemigo que entre al círculo tiene su daño de ataque reducido 30%
+    // mientras esté adentro (ver Combat.getEnemyZoneDamageMultiplier). No se
+    // especificó cuánto dura la zona — se igualó al cooldown (7s) para que
+    // quede disponible de nuevo justo cuando la anterior expira.
+    tanque: {
+        name: 'Bastión', emoji: '🔨', color: '#4169e1',
+        radius: 200, allyDefenseBonusPercent: 0.50, enemyDamageReducePercent: 0.30,
+        cooldownMs: 7000, durationMs: 7000,
+    },
+    // Mago — Parpadeo Arcano: teletransporte instantáneo de HASTA 400px (a
+    // donde apuntaba el mouse si estaba más cerca que el rango máximo — no
+    // siempre salta al tope, ver fireSkill1Mago/aimDist; sin animación de
+    // vuelo, a diferencia de las clases que "saltan/dashean") + 20% de daño
+    // extra en todos los ataques durante 5s.
+    mago: {
+        name: 'Parpadeo Arcano', emoji: '🧙', color: '#00ffff',
+        teleportRange: 400, dmgBuffPercent: 0.20, dmgBuffDurationMs: 5000, cooldownMs: 5000,
+    },
+    // Arquero — Retirada Certera: salto de 200px (0.1s) en la dirección
+    // OPUESTA al mouse (retirada) — la distancia del salto no se
+    // especificó, se usó 200px por quedar en línea con el resto de
+    // dashes/saltos cortos de esta tabla. Simultáneo, dispara el Ataque 1
+    // normal (misma animación/geometría) HACIA el mouse, pero en vez de
+    // daño normal aplica 20% de ralentización (duración no especificada,
+    // se usó 3s). Al lanzar la habilidad gana +20% de velocidad de
+    // movimiento (duración no especificada, se igualó al cooldown, 5s).
+    arquero: {
+        name: 'Retirada Certera', emoji: '🏹', color: '#228b22',
+        jumpRange: 200, jumpDurationMs: 100, slowPercent: 0.20, slowDurationMs: 3000,
+        speedBuffPercent: 0.20, speedBuffDurationMs: 5000, cooldownMs: 5000,
+    },
+};
+
+// Daño del dash de cancelación del Bárbaro según su % de vida ACTUAL (ver
+// RT_SKILL1_ABILITIES.barbaro.dashDmgTiers) — recorre la tabla de mayor a
+// menor y devuelve el primer umbral que cumple.
+function getBarbaroDashDamage(hpPercent) {
+    const tiers = RT_SKILL1_ABILITIES.barbaro.dashDmgTiers;
+    for (const t of tiers) if (hpPercent >= t.minHpPercent) return t.dmg;
+    return tiers[tiers.length - 1].dmg;
+}
+
+// ----- ATAQUE 3 "NUEVO" (tecla "3", ver Combat.startAimSkill3/releaseSkill3):
+// hechizo único por clase, agregado UNA clase a la vez a pedido del
+// usuario. Mientras una clase no tenga entrada acá, presionar "3" no hace
+// nada para ella (el viejo especial de carga universal — R/"3" original —
+// ya vive en la tecla Espacio y sigue intacto para todas, ver
+// RT_ATTACK_GEOMETRY[profId][2]). Mismo patrón de disparo que la tecla "1":
+// mantener "3" entra en modo "apuntando" (dibuja línea guía, ver
+// Combat.renderSkill3Aim), soltarla lo lanza hacia donde apuntaba el mouse
+// en ese instante.
+const RT_SKILL3_ABILITIES = {
+    // Mago — Vórtice Arcano: círculo que viaja HASTA 300px en la dirección
+    // del mouse (menos si el mouse está más cerca, mismo aimDist que
+    // RT_SKILL1_ABILITIES.mago) a velocidad constante (300px en 0.5s ->
+    // 600px/s, no especificado explícitamente pero consistente con "el
+    // recorrido máximo dura 0.5s"). Empieza en minRadius (30) y por cada
+    // `growthDivisor` px recorridos MÁS ALLÁ de `growthStartDist` (60px)
+    // crece 1px de radio — con 300px de viaje llega a maxRadius (150),
+    // calculado como minRadius + (maxTravelDist-growthStartDist)/growthDivisor
+    // = 30 + (300-60)/2 = 150. Todo enemigo tocado mientras viaja recibe
+    // dmgOnTouch UNA vez (barrido continuo, como el dash del Pícaro). Al
+    // llegar, queda estático staticDurationMs (5s) haciendo staticTickDmg
+    // cada staticTickMs (20 daño cada 0.5s = 40 dps) a los enemigos
+    // adentro. cooldownMs no se especificó — se usaron 8s (más que el
+    // ciclo de vida completo del vórtice, ~5.5s, para que no se pueda
+    // solapar con uno nuevo).
+    mago: {
+        name: 'Vórtice Arcano', emoji: '🌀', color: '#00ffff',
+        minRadius: 30, maxRadius: 150, maxTravelDist: 300,
+        growthStartDist: 60, growthDivisor: 2, travelSpeedPxPerSec: 600,
+        dmgOnTouch: 40, staticDurationMs: 5000, staticTickDmg: 20, staticTickMs: 500, cooldownMs: 8000,
+    },
+    // picaro/guerrero/barbaro/tanque/arquero: se agregan en próximos pedidos.
+};
+
 // Geometría/visual por profesión y slot. Cada entrada separa la FORMA DE
 // IMPACTO (hitShape: qué enemigos son alcanzados) del ESTILO VISUAL
 // (visual: cómo se dibuja), para poder rediseñar el look de cada clase sin
