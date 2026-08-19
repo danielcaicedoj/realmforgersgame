@@ -593,7 +593,12 @@ class Player {
     // foodBuffs. `version.duration` era "N combates" en el viejo sistema
     // por turnos; ahora que no hay un límite de encuentro fijo se traduce a
     // minutos reales (ver FOOD_BUFF_MINUTES_PER_UNIT), y expiran solos en
-    // tick() como cualquier otro buff temporal.
+    // tick() como cualquier otro buff temporal. No se acumula el mismo
+    // alimento: si ya hay uno activo, solo se puede reemplazar por una
+    // versión de efecto ESTRICTAMENTE mayor (ni siquiera se consume si no lo
+    // es). Máximo FOOD_BUFF_MAX_ACTIVE alimentos DISTINTOS activos a la vez
+    // (entre foodBuffs y regenBuffs); al comerse uno nuevo que supere el
+    // límite, se descarta el efecto más viejo (el primero que se comió).
     useFood(foodId, rarityId) {
         const key = `food_${foodId}__${rarityId}`;
         if ((this.materials[key] || 0) <= 0) return null;
@@ -601,17 +606,33 @@ class Player {
         if (!def) return null;
         const version = def.food.versions[rarityId];
         if (!version) return null;
+
+        const isRegen = def.food.stat === 'regen_time';
+        const targetArray = isRegen ? this.regenBuffs : this.foodBuffs;
+        const strengthOf = b => isRegen ? b.hpPerMin : b.amount;
+
+        const existingIdx = targetArray.findIndex(b => b.foodId === foodId);
+        if (existingIdx >= 0) {
+            if (version.amount <= strengthOf(targetArray[existingIdx])) return null;
+            const removed = targetArray.splice(existingIdx, 1)[0];
+            if (removed.stat === 'vida') this.recalcMaxHp();
+        } else if (this.foodBuffs.length + this.regenBuffs.length >= FOOD_BUFF_MAX_ACTIVE) {
+            this.evictOldestFoodEffect();
+        }
+
         this.materials[key]--;
 
-        if (def.food.stat === 'regen_time') {
+        if (isRegen) {
             this.regenBuffs.push({
                 foodId, name: def.food.name, emoji: def.food.emoji,
                 hpPerMin: version.amount, expiresAt: Date.now() + version.duration * 60000,
+                acquiredAt: Date.now(),
             });
         } else {
             this.foodBuffs.push({
                 foodId, name: def.food.name, emoji: def.food.emoji, stat: def.food.stat,
                 amount: version.amount, expiresAt: Date.now() + version.duration * FOOD_BUFF_MINUTES_PER_UNIT * 60000, turnRegen: version.regen || 0,
+                acquiredAt: Date.now(),
             });
             if (def.food.stat === 'vida') {
                 this.recalcMaxHp(); // sube maxHp con el nuevo buff antes de curar, para no perder el HP extra
@@ -619,6 +640,23 @@ class Player {
             }
         }
         return { name: def.food.name, emoji: def.food.emoji, rarity: getMonsterRarity(rarityId) };
+    }
+
+    // Descarta el efecto de alimento más viejo (menor acquiredAt) entre
+    // foodBuffs y regenBuffs combinados — ver useFood, límite de
+    // FOOD_BUFF_MAX_ACTIVE activos. Las entradas de guardados viejos sin
+    // acquiredAt (previas a este límite) se tratan como las más viejas.
+    evictOldestFoodEffect() {
+        let oldest = null, oldestArr = null, oldestIdx = -1;
+        const consider = (arr) => arr.forEach((b, i) => {
+            const at = b.acquiredAt || 0;
+            if (!oldest || at < (oldest.acquiredAt || 0)) { oldest = b; oldestArr = arr; oldestIdx = i; }
+        });
+        consider(this.foodBuffs);
+        consider(this.regenBuffs);
+        if (!oldestArr) return;
+        const removed = oldestArr.splice(oldestIdx, 1)[0];
+        if (removed.stat === 'vida') this.recalcMaxHp();
     }
 
     getDamage() {

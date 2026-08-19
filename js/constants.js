@@ -13,7 +13,7 @@ const WORLD_HEIGHT = 12000;
 // ----- SISTEMA DE PISOS -----
 const MAX_FLOOR = 1000;
 const MAX_PERGAMINOS_TELETRANSPORTE = 10; // cap de inventario para pergamino_teletransporte (ver Player.gainMaterial)
-const ENEMIES_PER_FLOOR = 240; // cap de enemigos vivos simultáneos por piso
+const ENEMIES_PER_FLOOR = 480; // cap de enemigos vivos simultáneos por piso (duplicado a pedido, el mapa se sentía vacío)
 const INITIAL_SPAWN_RATIO = 0.75; // el piso arranca con este % del cap; el resto se rellena con el respawn dinámico
 
 // ----- ZONAS DE RECURSOS -----
@@ -53,6 +53,7 @@ const CHESTS_PER_FLOOR = 5;
 const CHEST_ZONE_RADIUS = 750; // "cerca" del cofre: enemigos guardianes + conteo de progreso (triplicado a pedido)
 const CHEST_INTERACT_RANGE = 90;
 const CHEST_OPEN_TIME = 1000; // 1 segundo, igual que recolectar por ahora (GATHER_TIME)
+const CHEST_BOSS_RADIUS = 40; // cofre del Jefe Final: bastante más grande que un cofre normal (22)
 
 // Población de guardianes por cofre, escalada por rango de piso (más pisos
 // avanzados = cofre mejor custodiado). Se sortea un objetivo puntual dentro
@@ -652,6 +653,12 @@ function getHerbTierForFloor(floor) {
 // reales (ver Player.useFood/tick). 1.5 min ≈ la duración típica de un
 // combate anterior.
 const FOOD_BUFF_MINUTES_PER_UNIT = 1.5;
+
+// Un mismo alimento no se acumula (ver Player.useFood): solo se puede
+// reemplazar por una versión de efecto estrictamente mayor. Como máximo
+// FOOD_BUFF_MAX_ACTIVE alimentos DISTINTOS activos a la vez; al comerse uno
+// nuevo que supere el límite, se descarta el más viejo (FIFO).
+const FOOD_BUFF_MAX_ACTIVE = 5;
 
 // Pociones de curación: crafteadas con hierba + núcleo (ver player.craftPotion).
 // La rareza del núcleo determina cuánto curan; el costo de hierba es fijo,

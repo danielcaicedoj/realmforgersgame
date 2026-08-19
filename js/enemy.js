@@ -360,16 +360,19 @@ function spawnResourceNodeInDungeon(type, dungeon, excludeRoom) {
 // (ver spawnChestGuard/registerChestKill en game.js). Se abren con una
 // carga corta, como recolectar, una vez desbloqueados.
 class Chest {
-    constructor(x, y, rarity, guardTarget) {
+    constructor(x, y, rarity, guardTarget, opts = {}) {
         this.x = x;
         this.y = y;
-        this.radius = 22;
+        this.isBossChest = !!opts.isBossChest; // ver spawnFinalBossChest en game.js: sin guardianes, se desbloquea al morir el Jefe Final
+        this.radius = this.isBossChest ? CHEST_BOSS_RADIUS : 22;
         this.rarity = rarity;
         this.guardTarget = guardTarget; // población objetivo de guardianes Y denominador del progreso
         this.zoneKills = 0; // enemigos derrotados DENTRO de la zona (progreso de desbloqueo)
         this.unlocked = false;
         this.opened = false;
         this.pendingSpawns = []; // timestamps (ms epoch) de reposiciones de guardianes en curso
+        this.customLoot = null; // botín pre-armado (Jefe Final, ver Combat.onEnemyDefeated); si es null se genera con generateChestLoot al abrir
+        this.customGold = 0; // oro pre-armado (Jefe Final)
     }
 
     registerZoneKill() {

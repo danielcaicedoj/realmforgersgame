@@ -545,7 +545,28 @@
         const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
         const enemy = new Enemy(scaled, pos.x, pos.y);
         enemies.push(enemy);
+        enemy.linkedChest = spawnFinalBossChest(enemy);
         return enemy;
+    }
+
+    // Cofre grande vinculado al Jefe Final: aparece junto a él al spawnear y
+    // guarda TODO su botín (ver Combat.onEnemyDefeated) salvo la XP, que se
+    // otorga directo al morir. Sin guardianes (guardTarget=0): se desbloquea
+    // únicamente cuando el Jefe Final muere, sin importar la distancia (ver
+    // handleEnemyKilled), y queda excluido del desbloqueo por cercanía de
+    // cualquier otro enemigo (ver registerChestKill).
+    function spawnFinalBossChest(bossEnemy) {
+        const dist = bossEnemy.radius + CHEST_BOSS_RADIUS + 50;
+        let pos = null;
+        for (let i = 0; i < 12; i++) {
+            const rad = (i / 12) * Math.PI * 2;
+            const cand = { x: bossEnemy.x + Math.cos(rad) * dist, y: bossEnemy.y + Math.sin(rad) * dist };
+            if (dungeon.isWalkable(cand.x, cand.y, CHEST_BOSS_RADIUS)) { pos = cand; break; }
+        }
+        if (!pos) pos = { x: bossEnemy.x, y: bossEnemy.y };
+        const chest = new Chest(pos.x, pos.y, getMonsterRarity('mitico'), 0, { isBossChest: true });
+        chests.push(chest);
+        return chest;
     }
 
     function spawnFinalBossAt(floor) {
@@ -573,6 +594,14 @@
             player.bossHuntKills = 0;
             player.finalBossFloor = null;
             player.save();
+            // El cofre se desbloquea siempre al morir el Jefe Final, sin
+            // importar qué tan lejos haya terminado (el jugador puede
+            // arrastrarlo lejos de su punto de aparición antes de matarlo).
+            if (target.linkedChest && !target.linkedChest.opened) {
+                target.linkedChest.unlocked = true;
+                target.linkedChest.pendingSpawns = [];
+                addFloatingText(target.linkedChest.x, target.linkedChest.y - target.linkedChest.radius - 18, '🔓 ¡Cofre del Jefe Final desbloqueado!', '#ffd700', CHEST_LOOT_TEXT_LIFE);
+            }
             return;
         }
 
@@ -648,6 +677,9 @@
     // objetivo.
     function registerChestKill(target) {
         chests.forEach(chest => {
+            // El cofre del Jefe Final no usa guardianes/progreso por cercanía:
+            // se desbloquea solo cuando el jefe muere (ver handleEnemyKilled).
+            if (chest.isBossChest) return;
             if (chest.unlocked || chest.opened) return;
             const distToChest = Math.hypot(target.x - chest.x, target.y - chest.y);
             const isOwnGuard = target.chestGuardId === chest;
@@ -678,7 +710,8 @@
     function startOpenChest(chest) {
         if (dead || Combat.active || isAnyPanelOpen() || chest.opened) return;
         if (!chest.unlocked) {
-            addFloatingText(chest.x, chest.y - chest.radius - 16, `Cofre bloqueado: ${chest.zoneKills}/${chest.guardTarget}`, '#ff8585');
+            const msg = chest.isBossChest ? 'Cofre bloqueado: vence al Jefe Final' : `Cofre bloqueado: ${chest.zoneKills}/${chest.guardTarget}`;
+            addFloatingText(chest.x, chest.y - chest.radius - 16, msg, '#ff8585');
             return;
         }
         if (opening && opening.chest === chest) return; // ya en progreso
@@ -690,7 +723,10 @@
 
     function completeOpenChest(chest) {
         chest.opened = true;
-        const loot = generateChestLoot(chest.rarity, player.floor);
+        // El cofre del Jefe Final trae su botín pre-armado (ver
+        // Combat.onEnemyDefeated/spawnFinalBossChest); cualquier otro cofre
+        // lo genera recién al abrirse, como siempre.
+        const loot = chest.customLoot || generateChestLoot(chest.rarity, player.floor);
         const ids = Object.keys(loot);
         ids.forEach((id, i) => {
             const qty = loot[id];
@@ -698,7 +734,13 @@
             const info = getMaterialInfo(id);
             addFloatingText(chest.x, chest.y - 30 - i * 16, `+${qty} ${info.emoji} ${info.name}`, '#ffd27a', CHEST_LOOT_TEXT_LIFE);
         });
-        addFloatingText(chest.x, chest.y - 30 - ids.length * 16, `🎁 ¡Cofre ${chest.rarity.name} abierto!`, chest.rarity.color, CHEST_LOOT_TEXT_LIFE);
+        let lineCount = ids.length;
+        if (chest.customGold) {
+            player.gainGold(chest.customGold);
+            addFloatingText(chest.x, chest.y - 30 - lineCount * 16, `+${chest.customGold} 🪙`, '#ffd700', CHEST_LOOT_TEXT_LIFE);
+            lineCount++;
+        }
+        addFloatingText(chest.x, chest.y - 30 - lineCount * 16, `🎁 ¡Cofre ${chest.rarity.name} abierto!`, chest.rarity.color, CHEST_LOOT_TEXT_LIFE);
     }
 
     // Rendimiento de un nodo normal: 1-3 de base; un nodo especial: 10-20 de
@@ -1600,11 +1642,15 @@
 
     function drawChest(chest) {
         if (chest.opened) return;
-        drawEntity(chest.x, chest.y, chest.radius, chest.unlocked ? '🎁' : '🔒', '#5a4a2a');
+        drawEntity(chest.x, chest.y, chest.radius, chest.unlocked ? '🎁' : '🔒', chest.isBossChest ? '#6b4f1a' : '#5a4a2a');
         drawRarityRing(chest.x, chest.y, chest.radius, chest.rarity.color);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        if (!chest.unlocked) {
+        if (chest.isBossChest && !chest.unlocked) {
+            ctx.font = 'bold 12px sans-serif';
+            ctx.fillStyle = '#ffd27a';
+            ctx.fillText('👑 Vence al Jefe Final', chest.x, chest.y + chest.radius + 15);
+        } else if (!chest.unlocked) {
             const aliveGuards = countAliveChestGuards(chest);
             ctx.font = 'bold 12px sans-serif';
             ctx.fillStyle = '#fff';

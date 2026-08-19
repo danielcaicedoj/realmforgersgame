@@ -1144,17 +1144,18 @@ const Combat = {
         const player = this.player;
         const rarity = target.type.rarity || MONSTER_RARITIES[0];
         const bossKind = target.type.bossKind;
+        const isFinalBoss = bossKind === 'jefe_final';
+        // El Jefe Final no suelta nada directo salvo la XP: todo lo demás
+        // (oro, materiales, núcleos, pergaminos) se acumula en su cofre
+        // vinculado (ver spawnFinalBossChest/handleEnemyKilled en game.js) y
+        // se entrega recién cuando el jugador lo abre, sin importar la
+        // distancia a la que haya muerto el jefe.
+        const chestLoot = (isFinalBoss && target.linkedChest) ? {} : null;
 
         // Habilidad toggle (Ataque 2): +1 stack por CADA enemigo muerto
         // mientras está activa, sin importar qué lo mató (golpe, DoT, etc.).
         if (this.skill2.active) {
             this.skill2.stacks = Math.min(RT_TOGGLE_STACK_MAX, this.skill2.stacks + 1);
-        }
-
-        if (target.type.isFinalBoss) {
-            // El manejo de puntos/reinicio del Jefe Final vive en
-            // game.js/handleEnemyKilled (ver onKillHook más abajo); acá
-            // solo se otorga el loot, igual que cualquier otro enemigo.
         }
 
         // Tamaño de "grupo": enemigos vivos cerca del que acaba de morir,
@@ -1165,43 +1166,52 @@ const Combat = {
         const groupMult = getGroupMultiplier(groupSize);
         const gm = qty => Math.max(1, Math.round(qty * groupMult));
 
+        // La XP siempre se otorga directo, incluso al Jefe Final.
         const xpPenalty = (player.xpPenaltyUntil && Date.now() < player.xpPenaltyUntil) ? player.xpPenalty : 1;
         const xpGain = Math.round(getEnemyXPReward(player.floor, rarity.id, bossKind) * xpPenalty);
         player.gainXP(xpGain);
         if (this.spawnFloatingText) {
-            const boldIfRare = MONSTER_RARITIES.findIndex(r => r.id === rarity.id) >= 3;
             this.spawnFloatingText(target.x, target.y - target.radius - 26, `+${xpGain} XP`, rarity.color, 1200);
         }
 
+        const grant = (id, qty) => {
+            if (chestLoot) chestLoot[id] = (chestLoot[id] || 0) + qty;
+            else this.grantMaterial(id, qty);
+        };
+
         const goldGain = getEnemyGoldReward(player.floor, rarity.id, bossKind, groupSize);
-        player.gainGold(goldGain);
-        if (this.spawnFloatingText) this.spawnFloatingText(target.x, target.y - target.radius - 44, `+${goldGain} 🪙`, '#ffd700', 1200);
+        if (chestLoot) {
+            target.linkedChest.customGold = (target.linkedChest.customGold || 0) + goldGain;
+        } else {
+            player.gainGold(goldGain);
+            if (this.spawnFloatingText) this.spawnFloatingText(target.x, target.y - target.radius - 44, `+${goldGain} 🪙`, '#ffd700', 1200);
+        }
 
         const materialTierId = getMaterialTierForFloor(player.floor);
         const rarityIdx = MONSTER_RARITIES.findIndex(r => r.id === rarity.id);
 
         if (rarityIdx >= 1 && Math.random() < 0.08) {
-            this.grantMaterial('pergamino_teletransporte', 1);
+            grant('pergamino_teletransporte', 1);
         }
 
         const alteracion = getAlteracionDropInfo(rarity.id, bossKind);
         if (alteracion.guaranteed || Math.random() < alteracion.chance) {
             const qty = alteracion.guaranteed ? (1 + Math.floor(Math.random() * 3)) : 1;
-            this.grantMaterial(`pergamino_alteracion_tier${alteracion.tier}`, qty);
+            grant(`pergamino_alteracion_tier${alteracion.tier}`, qty);
         }
 
         const { tierId: nucleoTierId, count: nucleoCount } = rollNucleoDrops(player.floor);
-        this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(nucleoCount));
+        grant(getNucleoId(rarity.id, nucleoTierId), gm(nucleoCount));
 
-        if (bossKind === 'jefe_final') {
+        if (isFinalBoss) {
             const pisoEnRango = target.type.pisoEnRango || 10;
             const resourceQty = gm(Math.round(50 + ((pisoEnRango - 1) / 9) * 150));
-            this.grantMaterial(`mat_tier_${materialTierId}`, resourceQty);
-            this.grantMaterial(`madera_tier_${materialTierId}`, resourceQty);
-            this.grantMaterial(getNucleoId('comun', materialTierId), gm(45));
-            this.grantMaterial(getNucleoId('poco_comun', materialTierId), gm(30));
-            this.grantMaterial(getNucleoId('raro', materialTierId), gm(15));
-            this.grantMaterial(getNucleoId('mitico', materialTierId), gm(1));
+            grant(`mat_tier_${materialTierId}`, resourceQty);
+            grant(`madera_tier_${materialTierId}`, resourceQty);
+            grant(getNucleoId('comun', materialTierId), gm(45));
+            grant(getNucleoId('poco_comun', materialTierId), gm(30));
+            grant(getNucleoId('raro', materialTierId), gm(15));
+            grant(getNucleoId('mitico', materialTierId), gm(1));
             const altoPool = [
                 { id: 'epico', weight: 5 },
                 { id: 'legendario', weight: 1.5 },
@@ -1215,9 +1225,10 @@ const Combat = {
                     if (roll < p.weight) { chosen = p.id; break; }
                     roll -= p.weight;
                 }
-                this.grantMaterial(getNucleoId(chosen, materialTierId), gm(1));
+                grant(getNucleoId(chosen, materialTierId), gm(1));
             }
-            if (this.spawnFloatingText) this.spawnFloatingText(target.x, target.y - target.radius - 60, '👑 ¡Botín masivo!', '#ffd700', 1600);
+            if (chestLoot) target.linkedChest.customLoot = chestLoot;
+            if (this.spawnFloatingText) this.spawnFloatingText(target.x, target.y - target.radius - 60, '👑 ¡Su botín quedó en el cofre!', '#ffd700', 1600);
         } else if (bossKind === 'jefe') {
             this.grantMaterial(getNucleoId(rarity.id, nucleoTierId), gm(5));
             this.grantRandomTierMaterials(gm(30), materialTierId);

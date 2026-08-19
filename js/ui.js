@@ -331,44 +331,8 @@ const UI = {
         equippedSection.appendChild(armorDiv);
         list.appendChild(equippedSection);
 
-        // ----- BUFFS ACTIVOS (alimentos del campesino, ver foods.js) -----
-        if (player.foodBuffs.length || player.regenBuffs.length) {
-            const buffsSection = document.createElement('div');
-            buffsSection.className = 'inv-section';
-            const buffsTitle = document.createElement('div');
-            buffsTitle.className = 'inv-section-title';
-            buffsTitle.textContent = '🍽️ Buffs Activos';
-            buffsSection.appendChild(buffsTitle);
-
-            player.foodBuffs.forEach(b => {
-                const label = FOOD_STAT_LABELS[b.stat];
-                const minsLeft = Math.max(0, Math.ceil((b.expiresAt - Date.now()) / 60000));
-                const div = document.createElement('div');
-                div.className = 'inv-item';
-                div.innerHTML = `
-                    <div class="item-emoji">${b.emoji}</div>
-                    <div class="item-info">
-                        <div class="item-name">${b.name}</div>
-                        <div class="item-sub">+${b.amount} ${label.icon} ${label.name}${b.turnRegen ? ` · +${b.turnRegen} HP/seg` : ''} · ${minsLeft} min restante${minsLeft === 1 ? '' : 's'}</div>
-                    </div>
-                `;
-                buffsSection.appendChild(div);
-            });
-            player.regenBuffs.forEach(b => {
-                const minsLeft = Math.max(0, Math.ceil((b.expiresAt - Date.now()) / 60000));
-                const div = document.createElement('div');
-                div.className = 'inv-item';
-                div.innerHTML = `
-                    <div class="item-emoji">${b.emoji}</div>
-                    <div class="item-info">
-                        <div class="item-name">${b.name}</div>
-                        <div class="item-sub">💚 +${b.hpPerMin} HP/min · ${minsLeft} min restante${minsLeft === 1 ? '' : 's'}</div>
-                    </div>
-                `;
-                buffsSection.appendChild(div);
-            });
-            list.appendChild(buffsSection);
-        }
+        // Los buffs activos de alimentos ya NO se muestran acá — ver la
+        // barra de efectos debajo de la vida/XP (UI.updateEffectsHUD).
 
         // ----- BOLSO (recursos + armas/armaduras no equipadas) -----
         const bagSection = document.createElement('div');
@@ -1264,6 +1228,20 @@ const UI = {
         if (player.xpPenaltyUntil && Date.now() < player.xpPenaltyUntil) {
             lines.push({ color: '#e93cff', text: `💀 -${Math.round((player.xpPenalty || 0) * 100)}% XP` });
         }
+
+        // Buffs de alimentos (ver Player.useFood/foods.js): antes se
+        // mostraban en el inventario, ahora acá igual que el resto de
+        // efectos activos.
+        const now = Date.now();
+        player.foodBuffs.forEach(b => {
+            const label = FOOD_STAT_LABELS[b.stat];
+            const minsLeft = Math.max(0, Math.ceil((b.expiresAt - now) / 60000));
+            lines.push({ color: '#ffcb6b', text: `${b.emoji} +${b.amount} ${label.icon} ${label.name}${b.turnRegen ? ` +${b.turnRegen}HP/s` : ''} (${minsLeft}m)` });
+        });
+        player.regenBuffs.forEach(b => {
+            const minsLeft = Math.max(0, Math.ceil((b.expiresAt - now) / 60000));
+            lines.push({ color: '#7bffa0', text: `${b.emoji} +${b.hpPerMin} 💚 HP/min (${minsLeft}m)` });
+        });
 
         if (!lines.length) { el.classList.add('hidden'); return; }
         el.classList.remove('hidden');
