@@ -746,7 +746,9 @@ function getAttackCooldownMs(profId, slot, level) {
 // el bono por stack de cada clase (ver Combat.getSkill2*BonusPercent):
 //   dmgPct        -> % de daño extra en TODOS los ataques de esa clase (Guerrero/Mago)
 //   speedPct      -> % de velocidad de movimiento extra (Pícaro/Arquero)
-//   cdMs          -> reducción fija (ms) del cooldown del Ataque 1 (Pícaro/Arquero)
+//   cdMs          -> reducción fija (ms) del cooldown del Ataque 1 (Arquero)
+//   critPct       -> % de probabilidad de crítico extra (Pícaro — reemplazó
+//                     a cdMs para esta clase, a pedido del usuario)
 //   lifestealPct  -> % de robo de vida extra (Bárbaro) — cura, NO aumenta el daño
 //   defPct        -> % extra de mitigación de armadura (Tanque)
 // La geometría/visual del viejo Ataque2 en RT_ATTACK_GEOMETRY (slot 1) ya NO
@@ -773,7 +775,7 @@ const RT_TOGGLE_STACK_MAX = 10;
 // fijos; se les dio la misma velocidad que Pícaro, ~2s por vuelta).
 const RT_TOGGLE_SKILLS = {
     guerrero: { name: 'Espadas Orbitales', emoji: '⚔️', objectCount: 5, radius: 200, orbitMs: 3000, activateCooldownMs: 2500, color: '#ffd700', dmgBase: 7, tickMs: 1000, dmgPctPerStack: 0.02, dmgPctMax: 0.20 },
-    picaro:   { name: 'Dagas Orbitales', emoji: '🗡️', objectCount: 6, radius: 180, orbitMs: 2000, activateCooldownMs: 2500, color: '#d0d0e8', dmgBase: 3, tickMs: 500, speedPctPerStack: 0.02, speedPctMax: 0.20, cdMsPerStack: 100, cdMsMax: 1000 },
+    picaro:   { name: 'Dagas Orbitales', emoji: '🗡️', objectCount: 6, radius: 180, orbitMs: 2000, activateCooldownMs: 2500, color: '#d0d0e8', dmgBase: 3, tickMs: 500, speedPctPerStack: 0.02, speedPctMax: 0.20, critPctPerStack: 0.02, critPctMax: 0.20 },
     barbaro:  { name: 'Hachas Orbitales', emoji: '🪓', objectCount: 5, radius: 150, orbitMs: 3500, activateCooldownMs: 3000, color: '#8b0000', dmgBase: 4, tickMs: 1000, lifestealPctPerStack: 0.015, lifestealPctMax: 0.15 },
     arquero:  { name: 'Círculo de Flechas', emoji: '🏹', objectCount: 8, radius: 250, orbitMs: 2000, activateCooldownMs: 2000, color: '#228b22', dmgBase: 3, tickMs: 500, speedPctPerStack: 0.02, speedPctMax: 0.20, cdMsPerStack: 100, cdMsMax: 1000 },
     mago:     { name: 'Círculo de Runas', emoji: '🧙', objectCount: 6, radius: 250, orbitMs: 2000, activateCooldownMs: 2500, color: '#00ffff', dmgBase: 3, tickMs: 500, dmgPctPerStack: 0.02, dmgPctMax: 0.20 },
@@ -799,10 +801,14 @@ const RT_SKILL1_ABILITIES = {
     // Pícaro — Estocada Fantasma: dash de 400px en 0.1s, daño a TODO enemigo
     // tocado en el camino (barrido continuo durante la animación, no un
     // golpe único). Cada enemigo QUE MUERE por el dash reduce el cooldown
-    // restante 0.3s (puede dejarlo listo de inmediato con varias bajas).
+    // restante 0.3s (puede dejarlo listo de inmediato con varias bajas) Y
+    // además ahora suma +5%/6 (max 30%) de probabilidad de crítico
+    // PERMANENTE (sin duración, no se pidió que decaiga — ver
+    // Combat.getPicaroDashCritBonusPercent/skill1.picaroDashCritStacks).
     picaro: {
         name: 'Estocada Fantasma', emoji: '🗡️', color: '#d0d0e8',
         dashRange: 400, dashDurationMs: 100, dmgBase: 20, cooldownMs: 3000, cdReductionPerKillMs: 300,
+        critPerKillPercent: 0.05, critPerKillMaxStacks: 6,
     },
     // Guerrero — Salto Sísmico: salto de HASTA 300px en 0.1s (cae donde
     // apuntaba el mouse si estaba más cerca que el rango máximo — no
@@ -921,8 +927,76 @@ const RT_SKILL3_ABILITIES = {
         growthStartDist: 60, growthDivisor: 2, travelSpeedPxPerSec: 600,
         dmgOnTouch: 40, staticDurationMs: 5000, staticTickDmg: 20, staticTickMs: 500, cooldownMs: 8000,
     },
-    // picaro/guerrero/barbaro/tanque/arquero: se agregan en próximos pedidos.
+    // Arquero — Flecha Certera: proyectil ÚNICO objetivo (se detiene en el
+    // PRIMER enemigo que toca, a diferencia del vórtice que barre a todos)
+    // que viaja en la dirección del mouse — a diferencia del resto de
+    // hechizos con viaje (Pícaro/Guerrero/Mago), NO se acorta si el mouse
+    // está más cerca: siempre vuela hasta 1200px (o hasta chocar con una
+    // pared/enemigo), como una flecha real — el usuario no pidió el
+    // acortamiento acá y la fórmula de daño (basada en cuánto voló ANTES
+    // de pegar) solo tiene sentido si el vuelo no depende del click.
+    // Velocidad constante: 1200px en 2s -> 600px/s. El daño depende de
+    // cuántos píxeles ya recorrió al momento de tocar al enemigo (ver
+    // getArqueroArrowDamage): 0-50px=10, 50-200px=20, más allá de 200px
+    // sube 0.08 por píxel adicional (a 1200px: 20+0.08*1000=100, el
+    // ejemplo del pedido tenía un typo "0,04" pero el resultado final que
+    // dieron —100— solo cuadra con 0.08, se usó ese). Si mata al enemigo
+    // que toca, el cooldown se reinicia POR COMPLETO (no solo se reduce) y
+    // el jugador gana +10% de daño 10s (ver Combat.getSkill3DamageBuffPercent).
+    arquero: {
+        name: 'Flecha Certera', emoji: '🏹', color: '#228b22',
+        maxTravelDist: 1200, travelSpeedPxPerSec: 600,
+        dmgTier1: 10, dmgTier1MaxDist: 50,
+        dmgTier2: 20, dmgTier2MaxDist: 200,
+        dmgScalePerPixelBeyond200: 0.08,
+        cooldownMs: 6000, killDmgBuffPercent: 0.10, killDmgBuffDurationMs: 10000,
+    },
+    // Pícaro — Golpe de Ejecución: dash CORTO (150px, 0.1s, duración fija —
+    // a diferencia del vórtice/flecha, no viaja a "velocidad constante", es
+    // el mismo estilo de dash instantáneo que su propia Estocada Fantasma
+    // de tecla "1"). A DIFERENCIA de todos los demás dashes/proyectiles con
+    // barrido (que atraviesan/golpean a TODOS los que tocan), este se
+    // DETIENE en el PRIMER enemigo que encuentra — el jugador queda parado
+    // justo frente a él (no se superponen) — y dispara un cono pequeño +
+    // golpe único hacia ese enemigo (ver getPicaroSkill3Damage): daño base
+    // 50, sube a 60/70 si el enemigo está en 60%/40% de vida o menos, y lo
+    // EJECUTA (mata directo, ignora defensa) si está en 20% o menos. Si
+    // mata, el cooldown se reinicia POR COMPLETO (mismo patrón que la
+    // Flecha Certera del Arquero) Y cura 50% del daño realizado (para una
+    // ejecución, "daño realizado" = la vida que le quedaba al enemigo, ver
+    // Combat.updateRealtime). cooldownMs no se especificó — se usaron 4s
+    // (corto, en línea con el resto del kit rápido del Pícaro).
+    picaro: {
+        name: 'Golpe de Ejecución', emoji: '🗡️', color: '#d0d0e8',
+        dashRange: 150, dashDurationMs: 100,
+        dmgBase: 50, dmgTier60: 60, dmgTier40: 70,
+        tier60HpPercent: 0.60, tier40HpPercent: 0.40, executeHpPercent: 0.20,
+        coneRange: 70, coneAngle: 35,
+        cooldownMs: 4000, killHealPercent: 0.50,
+    },
+    // guerrero/barbaro/tanque: se agregan en próximos pedidos.
 };
+
+// Daño de la Flecha Certera del Arquero según cuántos píxeles ya voló al
+// momento de tocar al enemigo (ver RT_SKILL3_ABILITIES.arquero).
+function getArqueroArrowDamage(pixelsTraveled) {
+    const cfg = RT_SKILL3_ABILITIES.arquero;
+    if (pixelsTraveled <= cfg.dmgTier1MaxDist) return cfg.dmgTier1;
+    if (pixelsTraveled <= cfg.dmgTier2MaxDist) return cfg.dmgTier2;
+    return cfg.dmgTier2 + cfg.dmgScalePerPixelBeyond200 * (pixelsTraveled - cfg.dmgTier2MaxDist);
+}
+
+// Daño del Golpe de Ejecución del Pícaro según el % de vida ACTUAL del
+// enemigo golpeado (ver RT_SKILL3_ABILITIES.picaro). Devuelve `null` para
+// "ejecución" (mata directo, ver Combat.fireSkill3PicaroDash/updateRealtime
+// — no es un valor de daño real, ignora defensa).
+function getPicaroSkill3Damage(enemyHpPercent) {
+    const cfg = RT_SKILL3_ABILITIES.picaro;
+    if (enemyHpPercent <= cfg.executeHpPercent) return null;
+    if (enemyHpPercent <= cfg.tier40HpPercent) return cfg.dmgTier40;
+    if (enemyHpPercent <= cfg.tier60HpPercent) return cfg.dmgTier60;
+    return cfg.dmgBase;
+}
 
 // Geometría/visual por profesión y slot. Cada entrada separa la FORMA DE
 // IMPACTO (hitShape: qué enemigos son alcanzados) del ESTILO VISUAL

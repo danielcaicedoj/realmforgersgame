@@ -1825,6 +1825,7 @@
         Combat.renderSkill1Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "1" (línea/círculo)
         Combat.renderSkill3Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "3" (línea guía)
         Combat.renderVortex(ctx); // Vórtice Arcano del Mago (tecla "3")
+        Combat.renderArquero3Arrow(ctx); // Flecha Certera del Arquero (tecla "3")
         drawChargeRing();
 
         ctx.font = 'bold 14px sans-serif';

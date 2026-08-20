@@ -29,16 +29,26 @@
 const RT_CHARGE_RING_MS = 400; // cuánto tarda en llenarse el anillo visual de carga del Ataque 3 mientras se mantiene R
 const RT_POTION_COOLDOWN_MS = 2000; // reemplaza el viejo límite "3 por combate / 1 por turno"
 
-// Distancia de un punto (px,py) al SEGMENTO (x1,y1)-(x2,y2) — usado por el
-// barrido de daño de los dashes/saltos del hechizo de tecla "1" (ver
-// Combat.updateRealtime/this.leap) para no saltearse enemigos entre frames.
-function distancePointToSegment(px, py, x1, y1, x2, y2) {
+// Punto más cercano en el SEGMENTO (x1,y1)-(x2,y2) al punto (px,py) — usado
+// por el barrido de daño de los dashes/saltos/proyectiles de las teclas
+// "1"/"3" para no saltearse enemigos entre frames (Combat.updateRealtime),
+// y por la Flecha Certera del Arquero para saber EXACTAMENTE dónde a lo
+// largo del camino ocurrió el impacto (no la posición final del frame, que
+// puede estar mucho más adelante si el salto de tiempo entre frames es
+// grande — importa porque su daño depende de cuánto había recorrido en ese
+// punto, ver getArqueroArrowDamage).
+function closestPointOnSegment(px, py, x1, y1, x2, y2) {
     const dx = x2 - x1, dy = y2 - y1;
     const lenSq = dx * dx + dy * dy;
     let t = lenSq > 0 ? ((px - x1) * dx + (py - y1) * dy) / lenSq : 0;
     t = Math.max(0, Math.min(1, t));
-    const cx = x1 + t * dx, cy = y1 + t * dy;
-    return Math.hypot(px - cx, py - cy);
+    return { x: x1 + t * dx, y: y1 + t * dy };
+}
+
+// Distancia de un punto (px,py) al SEGMENTO (x1,y1)-(x2,y2).
+function distancePointToSegment(px, py, x1, y1, x2, y2) {
+    const p = closestPointOnSegment(px, py, x1, y1, x2, y2);
+    return Math.hypot(px - p.x, py - p.y);
 }
 
 const Combat = {
@@ -64,7 +74,12 @@ const Combat = {
     // `cooldownUntil` es único (no por clase, mismo patrón que
     // cooldownUntil[0..2] — cambiar de clase no lo resetea). El resto son
     // estados propios de cada clase (Bárbaro/Mago/Arquero).
-    skill1: { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0 },
+    // `picaroDashCritStacks` (0-6): +5%/stack de crítico PERMANENTE, +1 por
+    // cada kill con la Estocada Fantasma (tecla "1") — sin duración/decay
+    // (no se pidió que expire), solo se APLICA mientras Pícaro sea la
+    // clase activa (ver getPicaroDashCritBonusPercent), igual que el resto
+    // de bonos de clase, aunque el contador en sí no se resetea al cambiar.
+    skill1: { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0, picaroDashCritStacks: 0 },
     skill1CooldownUntil: 0,
     leap: null, // dash/salto/teletransporte en curso (ver startLeap) — { kind, startX/Y, endX/Y, startAt, durationMs, hitSet, onHitEnemy?, onComplete? }
     zones: [],  // áreas persistentes en el suelo (ver RT_SKILL1_ABILITIES.guerrero/tanque) — [{ kind, x, y, radius, expiresAt, ... }]
@@ -72,12 +87,15 @@ const Combat = {
 
     // Hechizo nuevo de tecla "3" (ver RT_SKILL3_ABILITIES): mismo patrón de
     // "mantener para apuntar, soltar para lanzar" que la tecla "1" (ver
-    // skill1.aiming). Por ahora solo el Mago tiene una entrada (Vórtice
-    // Arcano, único proyectil activo a la vez); `skill3CooldownUntil` es
-    // único, mismo patrón que skill1CooldownUntil.
-    skill3: { aiming: false },
+    // skill1.aiming). `skill3CooldownUntil` es único, mismo patrón que
+    // skill1CooldownUntil. `arrowKillDmgBuffUntil`: +10% de daño temporal
+    // del Arquero tras matar con la Flecha Certera (ver
+    // getSkill3DamageBuffPercent).
+    skill3: { aiming: false, arrowKillDmgBuffUntil: 0 },
     skill3CooldownUntil: 0,
-    vortex: null, // { profId, cfg, x, y, startX/Y, endX/Y, startAt, travelDurationMs, currentRadius, finalRadius, phase: 'traveling'|'static', hitSet, staticUntil, lastStaticTickAt, tierMult, rarityMult, rotationStartAt }
+    vortex: null, // Mago: { profId, cfg, x, y, startX/Y, endX/Y, startAt, travelDurationMs, currentRadius, finalRadius, phase: 'traveling'|'static', hitSet, staticUntil, lastStaticTickAt, tierMult, rarityMult, rotationStartAt }
+    arrow3: null, // Arquero: { profId, cfg, x, y, startX/Y, endX/Y, dirX, dirY, startAt, travelDurationMs, tierMult, rarityMult }
+    dash3: null,  // Pícaro: { profId, cfg, x, y, startX/Y, endX/Y, dirX, dirY, startAt, travelDurationMs, tierMult, rarityMult } — se detiene en el primer enemigo tocado (ver updateRealtime)
 
     potionCooldownUntil: 0,
 
@@ -95,14 +113,16 @@ const Combat = {
         this.charging = false;
         this.classCharge = { prof: null, count: 0 };
         this.skill2 = { active: false, profId: null, stacks: 0, activateCooldownUntil: 0, lastTickAt: 0, orbitStartAt: 0 };
-        this.skill1 = { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0 };
+        this.skill1 = { aiming: false, barbaroActive: false, barbaroActiveUntil: 0, mageDmgBuffUntil: 0, archerSpeedBuffUntil: 0, picaroDashCritStacks: 0 };
         this.skill1CooldownUntil = 0;
         this.leap = null;
         this.zones = [];
         this.dungeon = null;
-        this.skill3 = { aiming: false };
+        this.skill3 = { aiming: false, arrowKillDmgBuffUntil: 0 };
         this.skill3CooldownUntil = 0;
         this.vortex = null;
+        this.arrow3 = null;
+        this.dash3 = null;
         this.potionCooldownUntil = 0;
         this._basicStreak = 0;
         this.effects = [];
@@ -256,6 +276,128 @@ const Combat = {
             }
         }
 
+        // Flecha Certera del Arquero (tecla "3", ver RT_SKILL3_ABILITIES):
+        // vuela en línea recta a velocidad constante hasta el PRIMER
+        // enemigo que toque (barrido por segmento, se detiene ahí — a
+        // diferencia del vórtice, no sigue golpeando a más de uno) o hasta
+        // agotar su alcance. El daño depende de cuántos píxeles ya voló al
+        // momento del impacto (ver getArqueroArrowDamage). Si mata,
+        // reinicia el cooldown por completo y otorga el buff de daño.
+        if (this.arrow3) {
+            const a = this.arrow3;
+            const prevX = a.x, prevY = a.y;
+            const t = Math.min(1, (now - a.startAt) / a.travelDurationMs);
+            a.x = a.startX + (a.endX - a.startX) * t;
+            a.y = a.startY + (a.endY - a.startY) * t;
+
+            let hitEnemy = null, hitPoint = null;
+            for (const en of this.enemies) {
+                if (!en.alive) continue;
+                const cp = closestPointOnSegment(en.x, en.y, prevX, prevY, a.x, a.y);
+                const dist = Math.hypot(en.x - cp.x, en.y - cp.y);
+                if (dist <= 15 + en.radius) { hitEnemy = en; hitPoint = cp; break; }
+            }
+
+            if (hitEnemy) {
+                // Distancia recorrida HASTA EL PUNTO DE IMPACTO real, no la
+                // posición final del frame (con saltos de tiempo grandes
+                // podría estar mucho más adelante que donde realmente pegó).
+                const traveledDist = Math.hypot(hitPoint.x - a.startX, hitPoint.y - a.startY);
+                const baseDmg = getArqueroArrowDamage(traveledDist);
+                const dmg = this.computeArrow3Damage(a, baseDmg);
+                const dealt = hitEnemy.takeDamage(dmg, { flatPenetration: this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN });
+                this.spawnImpactFlash(hitEnemy.x, hitEnemy.y, a.cfg.color);
+                this.floatDamage(hitEnemy, dealt, false);
+                if (!hitEnemy.alive) {
+                    if (!hitEnemy._deathHandled) { hitEnemy._deathHandled = true; this.onEnemyDefeated(hitEnemy); }
+                    this.skill3CooldownUntil = now; // reinicio COMPLETO del cooldown (no solo reducción)
+                    this.skill3.arrowKillDmgBuffUntil = now + a.cfg.killDmgBuffDurationMs;
+                    if (this.spawnFloatingText) {
+                        this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 40, `+${Math.round(a.cfg.killDmgBuffPercent * 100)}% daño`, a.cfg.color, 1000);
+                    }
+                }
+                this.arrow3 = null;
+            } else if (t >= 1) {
+                this.arrow3 = null;
+            }
+        }
+
+        // Golpe de Ejecución del Pícaro (tecla "3", ver RT_SKILL3_ABILITIES):
+        // dash de 100px que, a diferencia de TODOS los demás dashes/
+        // proyectiles (que atraviesan/golpean a todo lo que tocan), se
+        // DETIENE en el PRIMER enemigo encontrado — el jugador queda
+        // reposicionado justo frente a él (no se superponen), dispara un
+        // cono pequeño + golpe único según su % de vida actual (ver
+        // getPicaroSkill3Damage; `null` = ejecución, mata directo). Si mata,
+        // reinicia el cooldown por completo (mismo patrón que la Flecha
+        // Certera del Arquero).
+        if (this.dash3) {
+            const d = this.dash3;
+            const prevX = d.x, prevY = d.y;
+            const t = Math.min(1, (now - d.startAt) / d.travelDurationMs);
+            const candX = d.startX + (d.endX - d.startX) * t;
+            const candY = d.startY + (d.endY - d.startY) * t;
+
+            let hitEnemy = null;
+            for (const en of this.enemies) {
+                if (!en.alive) continue;
+                const cp = closestPointOnSegment(en.x, en.y, prevX, prevY, candX, candY);
+                const dist = Math.hypot(en.x - cp.x, en.y - cp.y);
+                if (dist <= this.player.radius + en.radius) { hitEnemy = en; break; }
+            }
+
+            if (hitEnemy) {
+                // Detenerse "frente al enemigo": retrocede desde su centro
+                // la suma de ambos radios, a lo largo de la dirección del
+                // dash, para no terminar superpuesto con él.
+                const backDist = this.player.radius + hitEnemy.radius;
+                d.x = hitEnemy.x - d.dirX * backDist;
+                d.y = hitEnemy.y - d.dirY * backDist;
+                this.player.x = d.x;
+                this.player.y = d.y;
+
+                this.effects.push({ kind: 'cone', followPlayer: true, dirX: d.dirX, dirY: d.dirY, range: d.cfg.coneRange, angle: d.cfg.coneAngle, color: d.cfg.color, createdAt: now, duration: 250 });
+
+                const hpPercent = hitEnemy.hp / hitEnemy.maxHp;
+                const baseDmg = getPicaroSkill3Damage(hpPercent);
+                let dealt;
+                if (baseDmg === null) {
+                    // Ejecución: mata directo, ignora defensa/mitigación.
+                    // "Daño realizado" para la curación = la vida que le
+                    // quedaba (no hay un valor de daño real en una ejecución).
+                    dealt = hitEnemy.hp;
+                    hitEnemy.hp = 0;
+                    hitEnemy.alive = false;
+                    if (this.spawnFloatingText) this.spawnFloatingText(hitEnemy.x, hitEnemy.y - hitEnemy.radius - 20, '💀 ¡Ejecutado!', d.cfg.color, 1200);
+                } else {
+                    const dmg = this.computeDash3Damage(d, baseDmg);
+                    const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+                    dealt = hitEnemy.takeDamage(dmg, { flatPenetration });
+                    this.floatDamage(hitEnemy, dealt, false);
+                }
+                this.spawnImpactFlash(hitEnemy.x, hitEnemy.y, d.cfg.color);
+                if (!hitEnemy.alive) {
+                    if (!hitEnemy._deathHandled) { hitEnemy._deathHandled = true; this.onEnemyDefeated(hitEnemy); }
+                    this.skill3CooldownUntil = now; // reinicio COMPLETO del cooldown
+                    const healAmt = dealt * d.cfg.killHealPercent;
+                    if (healAmt > 0) {
+                        this.player.heal(healAmt);
+                        if (this.spawnFloatingText) this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `+${Math.round(healAmt)} HP`, '#7bffa0', 900);
+                    }
+                }
+                this.dash3 = null;
+            } else if (t >= 1) {
+                this.player.x = d.endX;
+                this.player.y = d.endY;
+                this.dash3 = null;
+            } else {
+                this.player.x = candX;
+                this.player.y = candY;
+                d.x = candX;
+                d.y = candY;
+            }
+        }
+
         // Habilidad toggle del Ataque 2 (ver RT_TOGGLE_SKILLS): se apaga
         // sola si el jugador cambió de clase activa (los orbitales son
         // propios de esa clase/arma), y dispara su pulso automático cada
@@ -397,9 +539,11 @@ const Combat = {
         let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
         dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
         dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
+        dmg *= (1 + this.getSkill3DamageBuffPercent(profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
 
-        const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
+        const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE
+            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId);
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
         const effectiveAtk = {
             damage: dmg,
@@ -456,6 +600,14 @@ const Combat = {
         const cfg = RT_TOGGLE_SKILLS[profId];
         if (!this._skill2Active(profId) || !cfg || !cfg.defPctPerStack) return 0;
         return Math.min(cfg.defPctMax, cfg.defPctPerStack * this.skill2.stacks);
+    },
+    // Pícaro: +2%/stack de probabilidad de crítico (máx 20% a 10 stacks) —
+    // reemplazó la reducción de cooldown del Ataque 1 que tenía antes, a
+    // pedido del usuario.
+    getSkill2CritChanceBonusPercent(profId) {
+        const cfg = RT_TOGGLE_SKILLS[profId];
+        if (!this._skill2Active(profId) || !cfg || !cfg.critPctPerStack) return 0;
+        return Math.min(cfg.critPctMax, cfg.critPctPerStack * this.skill2.stacks);
     },
 
     // Radio efectivo del círculo exterior/alcance de la habilidad toggle:
@@ -639,6 +791,7 @@ const Combat = {
                 if (!enemy.alive && !enemy._deathHandled) {
                     enemy._deathHandled = true;
                     this.skill1CooldownUntil = Math.max(Date.now(), this.skill1CooldownUntil - cfg.cdReductionPerKillMs);
+                    this.skill1.picaroDashCritStacks = Math.min(cfg.critPerKillMaxStacks, this.skill1.picaroDashCritStacks + 1);
                     this.onEnemyDefeated(enemy);
                 }
             },
@@ -757,7 +910,7 @@ const Combat = {
         if (atk) {
             const eff = this.player.getActiveEnchantEffects();
             const potenciaMult = 1 + this.player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
-            const dmg = atk.damage * potenciaMult * (1 + eff.dmgBonusPercent) * (1 + this.getPlayerZoneDamageBonusPercent());
+            const dmg = atk.damage * potenciaMult * (1 + eff.dmgBonusPercent) * (1 + this.getSkill3DamageBuffPercent('arquero')) * (1 + this.getPlayerZoneDamageBonusPercent());
             const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
             targets.forEach(t => {
                 const dealt = t.takeDamage(dmg, { flatPenetration });
@@ -833,6 +986,15 @@ const Combat = {
     getSkill1LifestealBonusPercent(profId) {
         if (profId === 'barbaro' && this.skill1.barbaroActive) return RT_SKILL1_ABILITIES.barbaro.lifestealPercent;
         return 0;
+    },
+    // Pícaro: +5%/kill con la Estocada Fantasma de probabilidad de crítico,
+    // PERMANENTE (máx 30% a 6 stacks, ver skill1.picaroDashCritStacks) —
+    // el contador no se resetea al cambiar de clase, pero solo se APLICA
+    // mientras Pícaro sea la clase activa, igual que el resto de bonos.
+    getPicaroDashCritBonusPercent(profId) {
+        if (profId !== 'picaro') return 0;
+        const cfg = RT_SKILL1_ABILITIES.picaro;
+        return Math.min(cfg.critPerKillMaxStacks * cfg.critPerKillPercent, this.skill1.picaroDashCritStacks * cfg.critPerKillPercent);
     },
 
     // Vista previa mientras se mantiene "1" (ver startAimSkill1): línea de
@@ -975,6 +1137,8 @@ const Combat = {
         }
 
         if (profId === 'mago') this.fireSkill3MagoVortex(cfg, dirX, dirY, aimDist);
+        else if (profId === 'arquero') this.fireSkill3ArqueroArrow(cfg, dirX, dirY);
+        else if (profId === 'picaro') this.fireSkill3PicaroDash(cfg, dirX, dirY);
     },
 
     // Mago — Vórtice Arcano: ver RT_SKILL3_ABILITIES.mago para la fórmula
@@ -1017,6 +1181,83 @@ const Combat = {
     computeVortexDamage(vortex, baseDamage) {
         let dmg = baseDamage * vortex.tierMult * vortex.rarityMult;
         dmg *= (1 + this.getSkill1DamageBuffPercent(vortex.profId));
+        dmg *= (1 + this.getSkill3DamageBuffPercent(vortex.profId));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        return dmg;
+    },
+
+    // Arquero — Flecha Certera: ver RT_SKILL3_ABILITIES.arquero. A
+    // diferencia de los demás hechizos con viaje, el alcance NO se acorta
+    // por la distancia al mouse (ver comentario en la config) — siempre
+    // apunta al máximo posible en la dirección elegida (pared o 1200px).
+    fireSkill3ArqueroArrow(cfg, dirX, dirY) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        const player = this.player;
+        const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, cfg.maxTravelDist, 5);
+        const actualDist = Math.hypot(dest.x - player.x, dest.y - player.y);
+        const travelDurationMs = Math.max(1, (actualDist / cfg.travelSpeedPxPerSec) * 1000);
+
+        const weapon = player.getCurrentWeapon();
+        this.arrow3 = {
+            profId: 'arquero', cfg,
+            startX: player.x, startY: player.y,
+            endX: dest.x, endY: dest.y,
+            x: player.x, y: player.y,
+            dirX, dirY,
+            startAt: Date.now(), travelDurationMs,
+            tierMult: weapon.tier ? weapon.tier.mult : 1,
+            rarityMult: weapon.rarity ? weapon.rarity.mult : 1,
+        };
+    },
+
+    // Daño de un golpe de la Flecha Certera: mismo patrón que
+    // computeVortexDamage (arma al lanzar + bonos de daño evaluados en el
+    // momento del golpe).
+    computeArrow3Damage(arrow, baseDamage) {
+        let dmg = baseDamage * arrow.tierMult * arrow.rarityMult;
+        dmg *= (1 + this.getSkill1DamageBuffPercent(arrow.profId));
+        dmg *= (1 + this.getSkill3DamageBuffPercent(arrow.profId));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        return dmg;
+    },
+
+    // Arquero: +10% de daño temporal tras matar con la Flecha Certera — 0 si no aplica.
+    getSkill3DamageBuffPercent(profId) {
+        if (profId === 'arquero' && Date.now() < this.skill3.arrowKillDmgBuffUntil) {
+            return RT_SKILL3_ABILITIES.arquero.killDmgBuffPercent;
+        }
+        return 0;
+    },
+
+    // Pícaro — Golpe de Ejecución: ver RT_SKILL3_ABILITIES.picaro. Dash
+    // corto de duración FIJA (100ms, no viaja "a velocidad constante" como
+    // el vórtice/flecha) — mismo estilo que su propia Estocada Fantasma de
+    // tecla "1". No se acorta por la distancia al mouse (mismo criterio
+    // que el resto de dashes, ver fireSkill1Picaro).
+    fireSkill3PicaroDash(cfg, dirX, dirY) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        const player = this.player;
+        const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, cfg.dashRange, player.radius);
+        const weapon = player.getCurrentWeapon();
+        this.dash3 = {
+            profId: 'picaro', cfg,
+            startX: player.x, startY: player.y,
+            endX: dest.x, endY: dest.y,
+            x: player.x, y: player.y,
+            dirX, dirY,
+            startAt: Date.now(), travelDurationMs: cfg.dashDurationMs,
+            tierMult: weapon.tier ? weapon.tier.mult : 1,
+            rarityMult: weapon.rarity ? weapon.rarity.mult : 1,
+        };
+    },
+
+    // Daño de un golpe del Golpe de Ejecución (tiers 50/60/70, NO se llama
+    // para la ejecución — esa mata directo, ver updateRealtime): mismo
+    // patrón que computeArrow3Damage/computeVortexDamage.
+    computeDash3Damage(dash, baseDamage) {
+        let dmg = baseDamage * dash.tierMult * dash.rarityMult;
+        dmg *= (1 + this.getSkill1DamageBuffPercent(dash.profId));
+        dmg *= (1 + this.getSkill3DamageBuffPercent(dash.profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
         return dmg;
     },
@@ -1041,8 +1282,18 @@ const Combat = {
             dirX /= len; dirY /= len;
         }
 
-        const maxRange = cfg.maxTravelDist || 0;
-        const lineDist = Math.min(maxRange, aimDist);
+        const maxRange = cfg.maxTravelDist || cfg.dashRange || 0;
+        // Arquero/Pícaro: ninguno de los dos dashes/proyectiles se acorta
+        // por la distancia al mouse (ver fireSkill3ArqueroArrow/
+        // fireSkill3PicaroDash) — la vista previa muestra siempre el
+        // alcance máximo real (pared o maxRange), no aimDist.
+        let lineDist;
+        if (profId === 'arquero' || profId === 'picaro') {
+            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, maxRange, 5);
+            lineDist = Math.hypot(dest.x - player.x, dest.y - player.y);
+        } else {
+            lineDist = Math.min(maxRange, aimDist);
+        }
         ctx.beginPath();
         ctx.moveTo(player.x, player.y);
         ctx.lineTo(player.x + dirX * lineDist, player.y + dirY * lineDist);
@@ -1120,6 +1371,35 @@ const Combat = {
         } else {
             drawRing(R, true, true, 3000, 1);
         }
+    },
+
+    // Dibuja la Flecha Certera del Arquero en vuelo (llamado desde
+    // game.js/render(), dentro del translate de cámara): trazo + punta
+    // triangular apuntando en la dirección de vuelo — dibujada en canvas
+    // (no CSS/DOM) para quedar consistente con el resto del pipeline
+    // visual del juego (mismo criterio que el resto de efectos, ver
+    // encabezado de este archivo).
+    renderArquero3Arrow(ctx) {
+        const a = this.arrow3;
+        if (!a) return;
+        const shaftLen = 26;
+        const backX = a.x - a.dirX * shaftLen, backY = a.y - a.dirY * shaftLen;
+        ctx.strokeStyle = a.cfg.color;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(backX, backY);
+        ctx.lineTo(a.x, a.y);
+        ctx.stroke();
+
+        const headAngle = Math.atan2(a.dirY, a.dirX);
+        const headSize = 10;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(a.x - Math.cos(headAngle - 0.4) * headSize, a.y - Math.sin(headAngle - 0.4) * headSize);
+        ctx.lineTo(a.x - Math.cos(headAngle + 0.4) * headSize, a.y - Math.sin(headAngle + 0.4) * headSize);
+        ctx.closePath();
+        ctx.fillStyle = a.cfg.color;
+        ctx.fill();
     },
 
     // Enemigos dentro de un cono frontal (usado por Ataque 1/2).
@@ -1218,11 +1498,15 @@ const Combat = {
         // Mago: +20% de daño temporal tras lanzar Parpadeo Arcano (ver
         // RT_SKILL1_ABILITIES.mago) — 0 si no aplica.
         dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
+        // Arquero: +10% de daño temporal tras matar con la Flecha Certera
+        // (ver RT_SKILL3_ABILITIES.arquero) — 0 si no aplica.
+        dmg *= (1 + this.getSkill3DamageBuffPercent(profId));
         // +25% mientras el jugador esté parado en la zona del Salto Sísmico
         // del Guerrero (ver RT_SKILL1_ABILITIES.guerrero) — 0 si no aplica.
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
 
-        const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE;
+        const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE
+            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId);
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
 
         const effectiveAtk = {

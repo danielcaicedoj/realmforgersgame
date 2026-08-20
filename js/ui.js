@@ -1306,6 +1306,8 @@ const UI = {
                 if (lifestealPct > 0) parts.push(`+${Math.round(lifestealPct * 100)}% robo de vida`);
                 const defPct = Combat.getSkill2DefenseBonusPercent(profId);
                 if (defPct > 0) parts.push(`+${Math.round(defPct * 100)}% mitigación`);
+                const critPct2 = Combat.getSkill2CritChanceBonusPercent(profId);
+                if (critPct2 > 0) parts.push(`+${Math.round(critPct2 * 100)}% crítico`);
                 if (parts.length) {
                     lines.push({ color: cfg.color, text: `${cfg.emoji} ${parts.join(', ')} (${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX})` });
                 }
@@ -1345,6 +1347,21 @@ const UI = {
         if (skill1GuerreroDmg > 0) {
             const cfg = RT_SKILL1_ABILITIES.guerrero;
             lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill1GuerreroDmg * 100)}% daño (Salto Sísmico)` });
+        }
+        // Pícaro: +5%/kill de crítico PERMANENTE con la Estocada Fantasma
+        // (tecla "1", máx 6 stacks/30% — ver skill1.picaroDashCritStacks).
+        const picaroDashCrit = Combat.getPicaroDashCritBonusPercent(profId);
+        if (picaroDashCrit > 0) {
+            const cfg = RT_SKILL1_ABILITIES.picaro;
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(picaroDashCrit * 100)}% crítico (Estocada Fantasma, ${Combat.skill1.picaroDashCritStacks}/${cfg.critPerKillMaxStacks})` });
+        }
+        // Arquero: +10% de daño temporal tras matar con la Flecha Certera
+        // (tecla "3", ver RT_SKILL3_ABILITIES.arquero).
+        const skill3DmgBuff = Combat.getSkill3DamageBuffPercent(profId);
+        if (skill3DmgBuff > 0) {
+            const cfg = RT_SKILL3_ABILITIES.arquero;
+            const remaining = Math.max(0, Combat.skill3.arrowKillDmgBuffUntil - Date.now());
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill3DmgBuff * 100)}% daño (${(remaining / 1000).toFixed(1)}s)` });
         }
 
         if (player.shield && player.shield.amount > 0) {
