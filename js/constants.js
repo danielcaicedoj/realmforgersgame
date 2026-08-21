@@ -543,6 +543,199 @@ const BOSS_TIERS = {
     jefe_final: { label: 'Jefe Final',          rarities: ['mitico'],              mult: 10, dmgMult: 4.0, radiusMult: 3 },
 };
 
+// ===== HABILIDADES DE JEFE (minijefe/jefe/jefe final) EN TIEMPO REAL =====
+// Meta final del pedido: minijefe 1 habilidad, jefe 2, jefe final 3 — pero
+// por ahora solo existen 2 habilidades implementadas (embestida/terremoto),
+// así que minijefes Y jefes reciben 1 sola, elegida al azar entre las 2,
+// para probarlas primero (pedido explícito del usuario, ver
+// spawnDynamicBoss en game.js). El jefe final todavía no recibe ninguna.
+//
+// Embestida Monstruosa: 1s de carga (círculo externo que se achica hasta
+// tocar al enemigo, ver telegraphExtraRadius) inmóvil, luego dash de
+// dashRange px hacia el jugador en dashDurationMs — SIEMPRE dura ese
+// tiempo fijo (se acorta la distancia recorrida si topa con una pared
+// antes, no el tiempo, mismo criterio que los dashes del jugador). A
+// cualquiera que toque en el camino le hace dashDmg de daño (daño directo,
+// sin bloqueo/esquiva — "a cualquier jugador que toque", no "ataque").
+//
+// Terremoto: misma carga de 1s inmóvil. Al terminar, el enemigo se queda
+// QUIETO EN EL CENTRO (corrección del usuario: NO queda libre de moverse
+// hasta que termine toda la secuencia) mientras 4 bandas concéntricas se
+// activan una por una, de adentro hacia afuera: la primera a los 0.2s, y
+// cada una siguiente 1s después de la anterior. Visualmente cada banda se
+// ve como un círculo que CRECE desde el borde interior hasta el borde
+// exterior de esa banda (una "carga" continua, no un anillo estático) —
+// al tocar el borde, la banda se activa: ringDmg de daño + ralentiza
+// slowPercent por slowDurationMs a quien esté dentro en ese instante (ver
+// Combat.tickBossCast, fase 'earthquake'). Un solo color para las 4 (el
+// usuario aclaró que los colores de la imagen de referencia eran solo
+// para explicar el orden, no para usar de verdad): rojo carmesí oscuro.
+// cooldownMs/initialDelayMs no se especificaron para esta habilidad — se
+// reutilizaron los mismos valores que Embestida (10s/3s) por consistencia.
+const BOSS_ABILITIES = {
+    embestida: {
+        id: 'embestida', name: 'Embestida Monstruosa', color: '#ff5c5c',
+        chargeMs: 1000, telegraphExtraRadius: 60,
+        dashRange: 700, dashDurationMs: 500, dashDmg: 50,
+        cooldownMs: 10000, initialDelayMs: 3000,
+    },
+    terremoto: {
+        id: 'terremoto', name: 'Terremoto', color: '#8b0000',
+        chargeMs: 1000, telegraphExtraRadius: 60,
+        ringRadii: [100, 200, 300, 400],
+        ringActivateDelaysMs: [200, 1200, 2200, 3200],
+        ringDmg: 30,
+        slowPercent: 0.30, slowDurationMs: 2000,
+        cooldownMs: 10000, initialDelayMs: 3000,
+    },
+    // Rayo Arcano: el enemigo queda INMÓVIL toda la duración (igual que
+    // Terremoto). 3 repeticiones independientes de "carga (1s, el rayo
+    // SIGUE la posición del jugador en cada frame) -> disparo (0.5s)",
+    // con 0.5s de pausa entre cada una. Geometría: 2 líneas de `range`
+    // (1000px), separadas `lineSeparation` (30px) entre sí, que se van
+    // CERRANDO durante el segundo de carga (30px -> 0, "hasta tocarse") y
+    // luego se vuelven a ABRIR durante los 0.5s de disparo (0 -> 30px) —
+    // el daño se aplica al terminar de abrirse (fin del disparo), no
+    // continuamente durante la animación (mismo criterio de "un solo
+    // golpe por evento" que Embestida/Terremoto). Tras dispararse, el
+    // rayo queda visible lingerMs (0.2s) más, titilando (alternando
+    // opacidad), antes de pasar a la pausa entre repeticiones. El
+    // relleno semitransparente entre las líneas se dibuja durante el
+    // disparo Y mientras titila (creciendo junto con la separación, ya
+    // totalmente abierto durante el titileo). Azul neón, pedido explícito.
+    rayo: {
+        id: 'rayo', name: 'Rayo Arcano', color: '#00e5ff',
+        chargeMs: 1000, fireMs: 500, lingerMs: 200, gapMs: 500, repeats: 3,
+        range: 1000, lineSeparation: 30, dmg: 50,
+        cooldownMs: 10000, initialDelayMs: 3000,
+    },
+};
+function getRandomBossAbilityId() {
+    const ids = Object.keys(BOSS_ABILITIES);
+    return ids[Math.floor(Math.random() * ids.length)];
+}
+
+// ===== HABILIDADES #2 DE JEFE (solo jefe/jefe final — "los minijefes solo
+// pueden tener habilidades #1", pedido explícito) =====
+//
+// Impenetrable: al cruzar por DEBAJO de triggerHpPercent (40%, sin ser
+// golpe letal) o al recibir un golpe que lo mataría (red de seguridad: se
+// salva con safetyNetHpPercent de vida en vez de morir), activa un escudo
+// de durationMs (3s): inmóvil, cura healPercentPerTick (5%) cada
+// healTickMs (0.5s) — 6 tics = 30% total — y todo daño desde FUERA de
+// `radius` (200px) se anula por completo (ver Enemy.takeDamage). Si
+// ESTANDO el escudo activo el jugador golpea desde DENTRO del radio con
+// un golpe que sería letal, el escudo se cancela y muere de verdad (evita
+// inmortalidad infinita). Visual: 2 círculos — uno a radius-5 (195px,
+// SOLO visual, gira horario) y otro a radius (200px, el límite real,
+// gira antihorario) — pedido explícito. Tras usarse, no puede reactivarse
+// hasta que la vida vuelva a superar el 40% (se "rearma", ver
+// Enemy.update) Y pasen cooldownMs (10s) desde la activación.
+//
+// División Celular: al "morir" (tier0, el jefe original), en vez de morir
+// de verdad se divide en 2 (tier1), cada uno con tier1HpPercent (50%) de
+// la vida máxima ORIGINAL — retienen la habilidad #1 asignada Y división
+// celular (para poder volver a dividirse). Al morir CADA tier1, se
+// divide en 2 tier2 (4 en total), cada uno con tier2HpPercent (25%) de la
+// vida máxima ORIGINAL — YA NO tienen habilidad #1 ni división celular
+// (no se dividen más), pero ganan tier2SpeedBonusPercent (+50%) de
+// velocidad de movimiento. Recién cuando MUEREN las 4 versiones tier2 se
+// otorga el loot/XP real (una sola vez, como si fuera 1 kill — ver
+// Combat.onEnemyDefeated/spawnDivisionClones).
+//
+// Frenesí Sangriento: al cruzar por debajo de triggerHpPercent (50%),
+// durante durationMs (5s) ataca a los ENEMIGOS MÁS CERCANOS (no al
+// jugador) con +dmgBonusPercent (50%) de daño y lifestealPercent (100%)
+// de robo de vida, y se mueve +speedBonusPercent (50%) más rápido. Por
+// cada enemigo que mate en este estado: cura killHealPercent (10%) de su
+// vida máxima y reduce el cooldown en curso killCooldownReduceMs (0.5s).
+// cooldownMs (10s) arranca a contar desde la ACTIVACIÓN (no desde que
+// termina) — se resetea/rearma igual que Impenetrable, solo con su
+// propio umbral (50%). detectRange/attackRange no se especificaron —
+// valores AJUSTABLES, iguales a rangos ya usados en el resto del juego.
+const BOSS_ABILITIES_2 = {
+    impenetrable: {
+        id: 'impenetrable', name: 'Impenetrable', color: '#ffd700',
+        triggerHpPercent: 0.40, durationMs: 3000, radius: 200, visualInnerRadius: 195,
+        healPercentPerTick: 0.05, healTickMs: 500,
+        cooldownMs: 10000, safetyNetHpPercent: 0.01,
+    },
+    division_celular: {
+        id: 'division_celular', name: 'División Celular', color: '#7cff7c',
+        tier1HpPercent: 0.50, tier2HpPercent: 0.25, tier2SpeedBonusPercent: 0.50,
+    },
+    frenesi: {
+        id: 'frenesi', name: 'Frenesí Sangriento', color: '#ff2b2b',
+        triggerHpPercent: 0.50, durationMs: 5000,
+        speedBonusPercent: 0.50, lifestealPercent: 1.0, dmgBonusPercent: 0.50,
+        killHealPercent: 0.10, killCooldownReduceMs: 500,
+        cooldownMs: 10000, detectRange: 400, attackRange: 60,
+    },
+};
+function getRandomBossAbility2Id() {
+    const ids = Object.keys(BOSS_ABILITIES_2);
+    return ids[Math.floor(Math.random() * ids.length)];
+}
+
+// ===== HABILIDADES #3 DE JEFE (SOLO jefe final) =====
+//
+// Caos Dimensional: el jefe final queda INMÓVIL toda la duración (mismo
+// mecanismo que Terremoto/Rayo Arcano — congela en.update() por completo,
+// ver Combat.updateRealtime) mientras corren DOS secuencias en paralelo,
+// cada una repitiéndose 5 veces:
+//   1. "rayo": el MISMO Rayo Arcano de la habilidad #1 (ver BOSS_ABILITIES.
+//      rayo) pero al DOBLE de velocidad (todos sus tiempos a la mitad:
+//      carga, disparo, titileo, pausa) y 5 repeticiones en vez de 3 —
+//      reutiliza toda la lógica/render ya hechos para Rayo Arcano, solo
+//      operando sobre un sub-estado propio (cast.rayo) en vez de
+//      en.bossCast directamente.
+//   2. "zona": una zona arcana que aparece SOBRE el jugador, empieza en
+//      growStartRadius (50px) y crece hasta growEndRadius (150px) en
+//      growMs (1s) SIGUIENDO al jugador mientras crece; al llegar a
+//      150px queda ESTÁTICA donde haya quedado y titila flickerMs (0.5s);
+//      luego se retrae a retractRadius (30px) en retractMs (0.1s); al
+//      llegar a 30px EXPLOTA en un radio de explosionRadius (300px, misma
+//      animación de círculo creciente que el Ataque 3 del jugador, tecla
+//      "Espacio", ver el efecto 'circle' ya usado en todo el juego) —
+//      explosionDmg no se especificó, se usó 60 (más que Embestida/Rayo,
+//      es la "ultimate" del jefe final — AJUSTABLE). gapAfterExplosionMs
+//      (1s) después, una nueva zona arcana nace sobre el jugador otra vez.
+// Ambas secuencias corren a la vez; la habilidad completa dura hasta que
+// AMBAS terminen sus 5 repeticiones (la que termine antes simplemente
+// espera a la otra). Cura healPercentPerSec (5%) de vida máxima cada
+// healTickMs (1s) durante TODA la duración. Al terminar, cooldownMs (10s)
+// — igual patrón de "disponible 3s después de entrar en combate" que el
+// resto de habilidades activas (initialDelayMs). Color no especificado:
+// violeta "dimensional", AJUSTABLE.
+const BOSS_ABILITIES_3 = {
+    caos_dimensional: {
+        id: 'caos_dimensional', name: 'Caos Dimensional', color: '#b366ff',
+        healPercentPerSec: 0.05, healTickMs: 1000,
+        rayo: {
+            ...BOSS_ABILITIES.rayo,
+            chargeMs: BOSS_ABILITIES.rayo.chargeMs / 2,
+            fireMs: BOSS_ABILITIES.rayo.fireMs / 2,
+            lingerMs: BOSS_ABILITIES.rayo.lingerMs / 2,
+            gapMs: BOSS_ABILITIES.rayo.gapMs / 2,
+            repeats: 5,
+        },
+        zona: {
+            growStartRadius: 50, growEndRadius: 150, growMs: 1000,
+            flickerMs: 500,
+            retractRadius: 30, retractMs: 100,
+            explosionRadius: 300, explosionDmg: 60,
+            gapAfterExplosionMs: 1000,
+            repeats: 5,
+            color: '#b366ff',
+        },
+        cooldownMs: 10000, initialDelayMs: 3000,
+    },
+};
+function getRandomBossAbility3Id() {
+    const ids = Object.keys(BOSS_ABILITIES_3);
+    return ids[Math.floor(Math.random() * ids.length)];
+}
+
 // ----- JEFE FINAL: sistema de puntos (desbloqueo) -----
 // Derrotar un enemigo normal suma 1 punto, un minijefe suma 10, un jefe (de
 // piso o dinámico) suma 20. Al llegar a FINAL_BOSS_POINTS_TARGET queda

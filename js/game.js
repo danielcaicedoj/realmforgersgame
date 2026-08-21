@@ -498,6 +498,13 @@
         scaled.isBoss = true;
         scaled.bossKind = kind;
         scaled.name = `${tierDef.label}: ${scaled.name}`;
+        // Habilidades de jefe en tiempo real (ver BOSS_ABILITIES/
+        // BOSS_ABILITIES_2 en constants.js): minijefe SOLO tiene
+        // habilidad #1 (elegida al azar); jefe tiene además habilidad #2
+        // (también al azar, pool independiente) — pedido explícito del
+        // usuario, "los minijefes solo pueden tener habilidades #1".
+        scaled.bossAbilityIds = [getRandomBossAbilityId()];
+        if (kind === 'jefe') scaled.bossAbility2Id = getRandomBossAbility2Id();
 
         const room = dungeon.rooms[Math.floor(Math.random() * dungeon.rooms.length)];
         const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
@@ -543,6 +550,11 @@
         scaled.bossKind = 'jefe_final';
         scaled.pisoEnRango = pisoEnRango; // ver Combat.onEnemyDefeated: escala el loot de ore/madera
         scaled.name = `${tierDef.label}: ${scaled.name}`;
+        // El Jefe Final recibe habilidad #1, #2 Y #3 (la #3 es exclusiva
+        // de jefes finales, ni minijefe ni jefe la reciben).
+        scaled.bossAbilityIds = [getRandomBossAbilityId()];
+        scaled.bossAbility2Id = getRandomBossAbility2Id();
+        scaled.bossAbility3Ids = [getRandomBossAbility3Id()];
 
         const room = dungeon.rooms[Math.floor(Math.random() * dungeon.rooms.length)];
         const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
@@ -1844,6 +1856,8 @@
         Combat.renderPicaroClone(ctx); // clon de Doble Sombra (tecla "3" del Pícaro)
         Combat.renderTanqueCircle(ctx); // Círculo del Gigante del Tanque (tecla "3"), anillo persistente mientras dure
         Combat.renderBarbaroSpin(ctx); // Torbellino de Espadas del Bárbaro (tecla "3")
+        Combat.renderBossCastTelegraphs(ctx); // círculo de carga de habilidades de jefe (Embestida/Terremoto/Rayo)
+        Combat.renderBossAbility2Effects(ctx); // Impenetrable/Frenesí Sangriento (habilidad #2)
         Combat.renderEffects(ctx);
         Combat.renderSkill2(ctx);
         Combat.renderSkill1Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "1" (línea/círculo)

@@ -165,6 +165,44 @@ class Enemy {
         // el último uso"), y escudo temporal de daño reducido.
         this.abilityState = { attacksSinceUse: 0, shieldUntil: 0 };
 
+        // Habilidades activas de jefe en tiempo real (Embestida Monstruosa/
+        // Terremoto, ver BOSS_ABILITIES en constants.js y
+        // Combat.updateRealtime) — DISTINTO de abilityState de arriba (esas
+        // son reactivas, al atacar). null = sin ninguna en curso;
+        // { abilityId, phase: 'charging'|'dashing', startAt, ... } mientras
+        // dura. combatStartAt: primer momento que dejó de estar 'idle' — ver
+        // el delay inicial de 3s antes de que la primera habilidad esté disponible.
+        this.bossCast = null;
+        this.bossCastCooldownUntil = 0;
+        this.combatStartAt = null;
+        // Habilidad #3 (solo jefe final, ver BOSS_ABILITIES_3/
+        // typeDef.bossAbility3Ids): cooldown PROPIO, independiente del de
+        // la habilidad #1 — comparte el mismo casillero this.bossCast
+        // (solo una habilidad activa a la vez), pero se cuenta aparte.
+        this.bossCast3CooldownUntil = 0;
+
+        // Habilidad #2 de jefe (Impenetrable/División Celular/Frenesí
+        // Sangriento, ver BOSS_ABILITIES_2 en constants.js) — se
+        // determina por `typeDef.bossAbility2Id`, distinto de
+        // `type.bossAbilityIds` (habilidad #1) y de `abilityState` de
+        // arriba (esas son reactivas al atacar).
+        this.bossShield = null;             // Impenetrable: { radius, startAt, expiresAt, lastHealTickAt }
+        this.bossShieldArmed = true;         // se rearma cuando la vida vuelve a superar el umbral
+        this.bossShieldCooldownUntil = 0;
+        this.frenzy = null;                  // Frenesí Sangriento: { startAt, expiresAt }
+        this.frenzyArmed = true;
+        this.frenzyCooldownUntil = 0;
+        // originalMaxHp: la vida máxima del jefe ORIGINAL (tier 0), que se
+        // propaga sin cambios a través de las generaciones de División
+        // Celular — necesaria porque cada tier calcula su % sobre la
+        // ORIGINAL, no sobre la del padre inmediato (ver
+        // Combat.spawnDivisionClones). Para un enemigo normal (sin
+        // división) es simplemente su propia vida máxima.
+        this.originalMaxHp = typeDef.hp;
+        this.divisionTier = 0;               // 0 = original, 1 = mitad (50%), 2 = cuarto (25%, ya no se divide más)
+        this.divisionGroup = null;           // { remaining } compartido entre las 4 versiones tier2 de la MISMA línea — ver spawnDivisionClones/onEnemyDefeated
+        this.pendingDivision = false;        // true = "murió" pero en realidad debe dividirse (ver Enemy.takeDamage/Combat.onEnemyDefeated)
+
         // Pathfinding (ver findPath más arriba): waypoints en píxeles hacia
         // el jugador, recalculados periódicamente (no cada frame). El
         // intervalo lleva un jitter propio por enemigo (500-800ms) para que
@@ -195,11 +233,82 @@ class Enemy {
         const flatPenetration = (opts && opts.flatPenetration) || 0;
         let dmg = amount;
         if (Date.now() < this.abilityState.shieldUntil) dmg *= 0.5; // ej. Espectro Oscuro / Sombra del Abismo
+
+        // Impenetrable (habilidad #2 de jefe, ver BOSS_ABILITIES_2 en
+        // constants.js): mientras el escudo esté activo, TODO daño desde
+        // FUERA del radio se anula por completo (0 daño, ni penetración
+        // ni ningún otro efecto lo atraviesa).
+        const now = Date.now();
+        if (this.bossShield && now < this.bossShield.expiresAt) {
+            const player = (typeof Combat !== 'undefined') ? Combat.player : null;
+            const dist = player ? Math.hypot(player.x - this.x, player.y - this.y) : Infinity;
+            if (dist > this.bossShield.radius) return 0;
+        }
+
         const defense = this.getEffectiveDefense(penetrate, flatPenetration);
         const finalDmg = Math.max(1, Math.round((dmg - defense) * 10) / 10);
+
+        if (this.bossShield && now < this.bossShield.expiresAt) {
+            // Golpe DESDE DENTRO del círculo mientras el escudo sigue
+            // activo: si sería letal, cancela el escudo y muere de
+            // verdad (evita quedar inmortal para siempre).
+            if (this.hp - finalDmg <= 0) {
+                this.bossShield = null;
+                this.hp = 0;
+                this.alive = false;
+            } else {
+                this.hp -= finalDmg;
+            }
+            return finalDmg;
+        }
+
         this.hp = Math.max(0, this.hp - finalDmg);
-        if (this.hp <= 0) this.alive = false;
+        this.resolveHpThresholds(now);
         return finalDmg;
+    }
+
+    // Cruce de umbral de Impenetrable/Frenesí Sangriento y red de
+    // seguridad/división ante un golpe letal (ver BOSS_ABILITIES_2) — se
+    // llama tanto desde takeDamage() como desde tickStatusEffects()
+    // (quemadura/sangrado), para que NINGUNA fuente de daño se salte
+    // estas reglas (ej. que la quemadura mate a un jefe con División
+    // Celular sin que se divida).
+    resolveHpThresholds(now) {
+        if (this.hp > 0 && this.type.bossAbility2Id === 'impenetrable'
+            && this.hp / this.maxHp < BOSS_ABILITIES_2.impenetrable.triggerHpPercent
+            && this.bossShieldArmed && now >= this.bossShieldCooldownUntil) {
+            this.activateImpenetrable(now);
+        }
+        if (this.hp > 0 && this.type.bossAbility2Id === 'frenesi'
+            && this.hp / this.maxHp < BOSS_ABILITIES_2.frenesi.triggerHpPercent
+            && this.frenzyArmed && now >= this.frenzyCooldownUntil) {
+            this.frenzyArmed = false;
+            this.frenzyCooldownUntil = now + BOSS_ABILITIES_2.frenesi.cooldownMs;
+            this.frenzy = { startAt: now, expiresAt: now + BOSS_ABILITIES_2.frenesi.durationMs };
+        }
+
+        if (this.hp <= 0) {
+            if (this.type.bossAbility2Id === 'impenetrable' && this.bossShieldArmed && now >= this.bossShieldCooldownUntil) {
+                // Red de seguridad: golpe letal SIN escudo activo todavía
+                // -> se salva con 1% de vida y activa el escudo en vez de morir.
+                this.hp = Math.max(0.1, Math.round(this.maxHp * BOSS_ABILITIES_2.impenetrable.safetyNetHpPercent * 10) / 10);
+                this.activateImpenetrable(now);
+            } else if (this.type.bossAbility2Id === 'division_celular' && this.divisionTier < 2) {
+                // División Celular: "muere" pero en realidad se divide —
+                // ver Combat.onEnemyDefeated/spawnDivisionClones.
+                this.alive = false;
+                this.pendingDivision = true;
+            } else {
+                this.alive = false;
+            }
+        }
+    }
+
+    activateImpenetrable(now) {
+        const cfg = BOSS_ABILITIES_2.impenetrable;
+        this.bossShieldArmed = false;
+        this.bossShieldCooldownUntil = now + cfg.durationMs + cfg.cooldownMs;
+        this.bossShield = { radius: cfg.radius, startAt: now, expiresAt: now + cfg.durationMs, lastHealTickAt: now };
     }
 
     // Tickea quemadura/sangrado (1 daño de tick por segundo real) y limpia
@@ -213,12 +322,19 @@ class Enemy {
             if (now - dot.lastTickAt >= 1000) {
                 dot.lastTickAt += 1000;
                 this.hp = Math.max(0, this.hp - dot.dmgPerSec);
-                if (this.hp <= 0) this.alive = false;
+                this.resolveHpThresholds(now);
             }
         });
         if (this.defenseMod && now >= this.defenseMod.expiresAt) this.defenseMod = null;
         if (this.attackMod && now >= this.attackMod.expiresAt) this.attackMod = null;
         if (this.speedMod && now >= this.speedMod.expiresAt) this.speedMod = null;
+        // Impenetrable/Frenesí Sangriento (ver BOSS_ABILITIES_2): mientras
+        // están activos, Combat.updateRealtime NO llama a update() en
+        // absoluto (queda "congelado", ver tickBossShield/tickFrenzy) —
+        // así que la limpieza al expirar tiene que pasar ACÁ, en el
+        // primer update() real que corre después de que ya venció.
+        if (this.bossShield && now >= this.bossShield.expiresAt) this.bossShield = null;
+        if (this.frenzy && now >= this.frenzy.expiresAt) this.frenzy = null;
     }
 
     // Movimiento + estado de IA. No dispara el ataque en sí (eso lo hace
@@ -232,6 +348,19 @@ class Enemy {
         if (!this.alive) return; // pudo morir por DoT en este mismo frame
 
         const now = Date.now();
+
+        // Rearma Impenetrable/Frenesí Sangriento (habilidad #2) en cuanto
+        // la vida vuelve a superar su propio umbral — sin esto, una vez
+        // usada no podría volver a activarse aunque pasen los 10s de
+        // cooldown (ver BOSS_ABILITIES_2, "si el jefe se cura por encima
+        // del umbral, la habilidad se puede volver a usar").
+        if (this.type.bossAbility2Id === 'impenetrable' && this.hp / this.maxHp >= BOSS_ABILITIES_2.impenetrable.triggerHpPercent) {
+            this.bossShieldArmed = true;
+        }
+        if (this.type.bossAbility2Id === 'frenesi' && this.hp / this.maxHp >= BOSS_ABILITIES_2.frenesi.triggerHpPercent) {
+            this.frenzyArmed = true;
+        }
+
         if (now < this.stunUntil) {
             this.aiState = 'stunned';
             return;
@@ -302,7 +431,15 @@ class Enemy {
         const dirX = targetX - this.x, dirY = targetY - this.y;
         const len = Math.hypot(dirX, dirY) || 1;
         const speedPenalty = (this.speedMod && Date.now() < this.speedMod.expiresAt) ? this.speedMod.percent : 0;
-        const step = this.speed * (1 - speedPenalty) * (dt / 16);
+        // Bonos de velocidad de habilidad #2 (ver BOSS_ABILITIES_2):
+        // fragmentos tier2 de División Celular (+50% permanente) y
+        // Frenesí Sangriento activo (+50% mientras dure) — no se
+        // combinan nunca en la práctica (un enemigo solo tiene UNA
+        // habilidad #2), pero se suman por si acaso.
+        let speedBonus = 0;
+        if (this.divisionTier >= 2) speedBonus += BOSS_ABILITIES_2.division_celular.tier2SpeedBonusPercent;
+        if (this.frenzy && Date.now() < this.frenzy.expiresAt) speedBonus += BOSS_ABILITIES_2.frenesi.speedBonusPercent;
+        const step = this.speed * (1 - speedPenalty) * (1 + speedBonus) * (dt / 16);
         const nx = this.x + (dirX / len) * step;
         const ny = this.y + (dirY / len) * step;
         if (!dungeon || dungeon.isWalkable(nx, this.y, this.radius)) this.x = nx;

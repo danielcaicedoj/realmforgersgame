@@ -66,6 +66,19 @@ function isAngleInSweep(targetAngle, fromAngle, toAngle) {
     return rel <= sweep;
 }
 
+// ¿El punto (px,py) cae dentro del "canal" rectangular del Rayo Arcano de
+// un jefe: un rayo que sale de (originX,originY) en dirección (dirX,dirY)
+// normalizada, de longitud `range` y ancho total `width` (halfWidth a cada
+// lado del eje central)? Proyecta el punto sobre el eje del rayo (along) y
+// mide su distancia perpendicular al eje (perp).
+function isPointInBeam(px, py, originX, originY, dirX, dirY, range, halfWidth) {
+    const relX = px - originX, relY = py - originY;
+    const along = relX * dirX + relY * dirY;
+    if (along < 0 || along > range) return false;
+    const perpX = relX - dirX * along, perpY = relY - dirY * along;
+    return Math.hypot(perpX, perpY) <= halfWidth;
+}
+
 const Combat = {
     player: null,
     enemies: [], // referencia viva al array de enemigos del piso actual (se refresca cada updateRealtime)
@@ -502,17 +515,58 @@ const Combat = {
         }
 
         // Doble Sombra del Pícaro (ver RT_SKILL3_ABILITIES.picaro): mientras
-        // el clon exista, la IA de TODOS los enemigos (persecución, rango
-        // de ataque, todo) apunta a ÉL en vez del jugador real — así "no lo
-        // ven" sin tener que tocar Enemy.js. La invisibilidad en sí (sin
-        // clon) se resuelve más abajo, en performEnemyAttackRT: el golpe
-        // simplemente no conecta con nada.
-        const aiTarget = this.picaroClone
+        // el clon exista Y la invisibilidad SIGA activa, la IA de TODOS los
+        // enemigos (persecución, rango de ataque, todo) apunta a ÉL en vez
+        // del jugador real — así "no lo ven" sin tener que tocar Enemy.js.
+        // Bug corregido: antes esto solo dependía de que el clon existiera,
+        // así que si sobrevivía más allá de los 3s de invisibilidad (no
+        // tiene expiración propia, solo muere por daño), los enemigos
+        // seguían "atacando" al clon indefinidamente aunque el jugador ya
+        // fuera visible de nuevo — ahora, en cuanto pasan los 3s, la IA
+        // vuelve a apuntar al jugador real sin importar si el clon sigue
+        // vivo (queda como un señuelo inerte, ya no redirige nada).
+        const clonActivo = this.picaroClone && player.invisibleUntil && now < player.invisibleUntil;
+        const aiTarget = clonActivo
             ? { x: this.picaroClone.x, y: this.picaroClone.y, radius: this.picaroClone.radius }
             : player;
 
         enemies.forEach(en => {
             if (!en.alive) return;
+
+            // Disponibilidad inicial de habilidades de jefe (ver
+            // BOSS_ABILITIES): arranca a contar 3s recién cuando el
+            // enemigo "detecta" al jugador (deja de estar 'idle'); si
+            // vuelve a perderlo de vista, el timer se reinicia.
+            if (en.type.bossAbilityIds && en.type.bossAbilityIds.length) {
+                if (en.aiState === 'idle') en.combatStartAt = null;
+                else if (en.combatStartAt == null) en.combatStartAt = now;
+            }
+
+            // Mientras haya un cast en curso (cargando o dasheando), el
+            // enemigo NO usa su IA normal (ni se mueve por su cuenta ni
+            // ataca) — ver tickBossCast.
+            if (en.bossCast) {
+                this.tickBossCast(en, now, dungeon);
+                if (!en.alive && !en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
+                return;
+            }
+
+            // Impenetrable (habilidad #2): "durante 3 segundos se queda
+            // quieto" — mismo criterio de congelar el update() normal que
+            // bossCast de arriba, ver tickBossShield.
+            if (en.bossShield && now < en.bossShield.expiresAt) {
+                this.tickBossShield(en, now);
+                return;
+            }
+
+            // Frenesí Sangriento (habilidad #2): mientras dure, ataca al
+            // enemigo MÁS CERCANO (no al jugador) — reemplaza por
+            // completo su IA normal, ver tickFrenzy.
+            if (en.frenzy && now < en.frenzy.expiresAt) {
+                this.tickFrenzy(en, dt, now, dungeon);
+                return;
+            }
+
             en.update(dt, aiTarget, dungeon);
             if (!en.alive) {
                 if (!en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
@@ -533,7 +587,439 @@ const Combat = {
                 const intervalMs = (en.type.rarity && en.type.rarity.attackIntervalMs) || 1000;
                 en.nextAttackAt = now + intervalMs;
             }
+
+            this.tryStartBossCast(en, now);
         });
+    },
+
+    // Intenta iniciar una habilidad de jefe (ver BOSS_ABILITIES): elige
+    // una al azar entre las asignadas a este enemigo (por ahora siempre 1
+    // sola, ver spawnDynamicBoss en game.js) y entra en fase "cargando".
+    // El delay inicial de 3s se mide con la config de la PRIMERA habilidad
+    // asignada (hoy es la única — si en el futuro hay varias con delays
+    // distintos, esto habría que revisarlo).
+    // Tickea el escudo de Impenetrable activo: cura healPercentPerTick
+    // (5%) cada healTickMs (0.5s) — el enemigo queda "quieto" porque este
+    // método reemplaza por completo a en.update() mientras dure (ver
+    // updateRealtime). El daño-cero desde fuera del radio y la
+    // cancelación por golpe letal desde dentro ya se resuelven en
+    // Enemy.takeDamage — acá solo se maneja la curación.
+    tickBossShield(en, now) {
+        const cfg = BOSS_ABILITIES_2.impenetrable;
+        const shield = en.bossShield;
+        if (now - shield.lastHealTickAt >= cfg.healTickMs) {
+            shield.lastHealTickAt += cfg.healTickMs;
+            const healAmt = Math.round(en.maxHp * cfg.healPercentPerTick);
+            en.hp = Math.min(en.maxHp, en.hp + healAmt);
+            if (this.spawnFloatingText) this.spawnFloatingText(en.x, en.y - en.radius - 20, `+${healAmt}`, cfg.color, 800);
+        }
+        if (now >= shield.expiresAt) en.bossShield = null;
+    },
+
+    // Tickea Frenesí Sangriento activo: busca el enemigo vivo más cercano
+    // (nunca al jugador) y lo persigue/ataca en su lugar — reutiliza
+    // en.update()/stepToward pasándole un "objetivo" falso con la
+    // posición del otro enemigo (mismo truco que el clon de Doble Sombra
+    // con aiTarget, sin tocar la firma de Enemy.update). Bug reportado
+    // por el usuario: si NO hay ningún otro enemigo cerca, se quedaba
+    // parado sin hacer nada (el pedido no aclaraba este caso) — ahora
+    // cae de vuelta a atacar al jugador normalmente, con los mismos
+    // bonos de daño/robo de vida (ver performEnemyAttackRT, que ya los
+    // aplica si enemy.frenzy está activo).
+    tickFrenzy(en, dt, now, dungeon) {
+        const cfg = BOSS_ABILITIES_2.frenesi;
+        let nearest = null, nearestDist = Infinity;
+        this.enemies.forEach(other => {
+            if (other === en || !other.alive) return;
+            const d = Math.hypot(other.x - en.x, other.y - en.y);
+            if (d < nearestDist) { nearestDist = d; nearest = other; }
+        });
+
+        if (nearest && nearestDist <= cfg.detectRange) {
+            if (nearestDist <= cfg.attackRange) {
+                en.aiState = 'attacking';
+                if (now >= en.nextAttackAt) {
+                    this.performFrenzyAttack(en, nearest, cfg);
+                    en.nextAttackAt = now + ((en.type.rarity && en.type.rarity.attackIntervalMs) || 1000);
+                }
+            } else {
+                en.aiState = 'chasing';
+                en.update(dt, { x: nearest.x, y: nearest.y, radius: nearest.radius }, dungeon);
+            }
+            return;
+        }
+
+        const player = this.player;
+        const distToPlayer = Math.hypot(player.x - en.x, player.y - en.y);
+        if (distToPlayer <= (en.type.attackRange || ENEMY_ATTACK_RANGE)) {
+            en.aiState = 'attacking';
+            if (now >= en.nextAttackAt) {
+                this.performEnemyAttackRT(en);
+                if (!en.alive) return;
+                en.nextAttackAt = now + ((en.type.rarity && en.type.rarity.attackIntervalMs) || 1000);
+            }
+        } else {
+            en.aiState = 'chasing';
+            en.update(dt, player, dungeon);
+        }
+    },
+
+    // Un golpe de Frenesí Sangriento contra OTRO enemigo (no el jugador):
+    // +dmgBonusPercent de daño, +lifestealPercent de robo de vida sobre
+    // el daño repartido. Si mata: cura killHealPercent de su vida máxima
+    // y reduce el cooldown en curso killCooldownReduceMs.
+    performFrenzyAttack(en, target, cfg) {
+        let baseDmg = en.type.dmg;
+        if (en.attackMod && Date.now() < en.attackMod.expiresAt) baseDmg = Math.max(1, baseDmg - en.attackMod.flat);
+        const dmg = Math.round(baseDmg * (1 + cfg.dmgBonusPercent));
+        const dealt = target.takeDamage(dmg, {});
+        this.spawnImpactFlash(target.x, target.y, cfg.color);
+        this.floatDamage(target, dealt, false);
+        if (dealt > 0) en.hp = Math.min(en.maxHp, en.hp + Math.round(dealt * cfg.lifestealPercent));
+        if (!target.alive) {
+            if (!target._deathHandled) { target._deathHandled = true; this.onEnemyDefeated(target); }
+            en.hp = Math.min(en.maxHp, en.hp + Math.round(en.maxHp * cfg.killHealPercent));
+            en.frenzyCooldownUntil = Math.max(Date.now(), en.frenzyCooldownUntil - cfg.killCooldownReduceMs);
+        }
+    },
+
+    tryStartBossCast(en, now) {
+        if (en.aiState === 'idle') return;
+        if (en.combatStartAt == null) return;
+        // Si el jugador está invisible (Doble Sombra del Pícaro) el
+        // enemigo "no lo ve" — mismo criterio que performEnemyAttackRT
+        // para el ataque normal, evita que Embestida (o cualquier
+        // habilidad de jefe) lo embista/apunte mientras dure. Ojo: NO
+        // basta con chequear si hay un clon vivo (el clon no expira solo,
+        // puede sobrevivir mucho más que los 3s de invisibilidad — mismo
+        // bug que se corrigió en el aiTarget/performEnemyAttackRT), lo que
+        // importa es el timestamp invisibleUntil en sí.
+        if (this.player.invisibleUntil && now < this.player.invisibleUntil) return;
+
+        // Habilidad #3 (solo jefe final, ver BOSS_ABILITIES_3) tiene
+        // PRIORIDAD sobre la #1 cuando está disponible — comparten el
+        // mismo casillero en.bossCast (solo una activa a la vez) pero
+        // cooldowns independientes, así que la #1 sigue llenando los
+        // huecos mientras la #3 (la "ultimate") está en cooldown.
+        const ability3Ids = en.type.bossAbility3Ids;
+        if (ability3Ids && ability3Ids.length) {
+            const gate3Cfg = BOSS_ABILITIES_3[ability3Ids[0]];
+            if (now >= en.combatStartAt + gate3Cfg.initialDelayMs && now >= en.bossCast3CooldownUntil) {
+                const ability3Id = ability3Ids[Math.floor(Math.random() * ability3Ids.length)];
+                this.startBossCast3(en, ability3Id, now);
+                return;
+            }
+        }
+
+        const abilityIds = en.type.bossAbilityIds;
+        if (!abilityIds || !abilityIds.length) return;
+        const gateCfg = BOSS_ABILITIES[abilityIds[0]];
+        if (now < en.combatStartAt + gateCfg.initialDelayMs) return;
+        if (now < en.bossCastCooldownUntil) return;
+        const abilityId = abilityIds[Math.floor(Math.random() * abilityIds.length)];
+        if (abilityId === 'rayo') {
+            const player = this.player;
+            let dirX = player.x - en.x, dirY = player.y - en.y;
+            const len = Math.hypot(dirX, dirY) || 1;
+            en.bossCast = { abilityId, phase: 'charging', startAt: now, repeatIndex: 0, dirX: dirX / len, dirY: dirY / len };
+            return;
+        }
+        en.bossCast = { abilityId, phase: 'charging', startAt: now };
+    },
+
+    // Arranca una habilidad #3 (solo Caos Dimensional por ahora) — ver
+    // tickCaosDimensional para el resto del ciclo de vida.
+    startBossCast3(en, abilityId, now) {
+        if (abilityId === 'caos_dimensional') {
+            const player = this.player;
+            let dirX = player.x - en.x, dirY = player.y - en.y;
+            const len = Math.hypot(dirX, dirY) || 1;
+            const zcfg = BOSS_ABILITIES_3.caos_dimensional.zona;
+            en.bossCast = {
+                abilityId, startAt: now, lastHealTickAt: now,
+                rayo: { phase: 'charging', startAt: now, repeatIndex: 0, dirX: dirX / len, dirY: dirY / len, done: false },
+                zona: { phase: 'growing', startAt: now, repeatIndex: 0, x: player.x, y: player.y, radius: zcfg.growStartRadius, done: false },
+            };
+        }
+    },
+
+    // Tickea un cast de jefe en curso (cargando, dasheando, o resolviendo
+    // un Terremoto) — llamado en vez de en.update() mientras dure, así el
+    // enemigo queda "quieto" durante toda la duración de la habilidad
+    // (incluida la fase 'earthquake', por pedido explícito del usuario) y
+    // se mueve SOLO por el dash durante la fase 'dashing'.
+    tickBossCast(en, now, dungeon) {
+        const cast = en.bossCast;
+
+        // Caos Dimensional (habilidad #3, solo jefe final): vive en su
+        // propia tabla (BOSS_ABILITIES_3, no BOSS_ABILITIES) y tiene su
+        // propio manejo completo — ver tickCaosDimensional.
+        if (cast.abilityId === 'caos_dimensional') {
+            this.tickCaosDimensional(en, now, dungeon);
+            return;
+        }
+
+        const cfg = BOSS_ABILITIES[cast.abilityId];
+        const player = this.player;
+
+        // Rayo Arcano: fases propias (charging/firing/gap), NO comparte el
+        // manejo genérico de abajo porque su carga necesita ACTUALIZAR la
+        // dirección cada frame (sigue al jugador), a diferencia de
+        // Embestida/Terremoto donde la dirección/posición se fija recién
+        // al terminar la carga.
+        if (cast.abilityId === 'rayo') {
+            if (cast.phase === 'charging') {
+                let dirX = player.x - en.x, dirY = player.y - en.y;
+                const len = Math.hypot(dirX, dirY) || 1;
+                cast.dirX = dirX / len; cast.dirY = dirY / len;
+                if (now - cast.startAt < cfg.chargeMs) return;
+                cast.phase = 'firing';
+                cast.startAt = now;
+                return;
+            }
+            if (cast.phase === 'firing') {
+                if (now - cast.startAt < cfg.fireMs) return;
+                // El "disparo" se resuelve al TERMINAR de reabrirse (fin de
+                // la animación de 0.5s) — un solo golpe por repetición,
+                // mismo criterio de "hit puntual" que Embestida/Terremoto.
+                const playerHittable = !(player.invisibleUntil && now < player.invisibleUntil);
+                if (playerHittable && isPointInBeam(player.x, player.y, en.x, en.y, cast.dirX, cast.dirY, cfg.range, cfg.lineSeparation / 2 + player.radius)) {
+                    const dealt = player.takeDamage(cfg.dmg);
+                    if (this.spawnFloatingText) this.spawnFloatingText(player.x, player.y - player.radius - 12, `-${dealt}`, cfg.color);
+                }
+                // Tras el golpe, el rayo se queda visible (titilando)
+                // lingerMs (0.2s) antes de pasar a la pausa entre
+                // repeticiones — pedido explícito del usuario.
+                cast.phase = 'lingering';
+                cast.startAt = now;
+                return;
+            }
+            if (cast.phase === 'lingering') {
+                if (now - cast.startAt < cfg.lingerMs) return;
+                if (cast.repeatIndex >= cfg.repeats - 1) {
+                    en.bossCast = null;
+                    en.bossCastCooldownUntil = now + cfg.cooldownMs;
+                } else {
+                    cast.repeatIndex++;
+                    cast.phase = 'gap';
+                    cast.startAt = now;
+                }
+                return;
+            }
+            if (cast.phase === 'gap') {
+                if (now - cast.startAt < cfg.gapMs) return;
+                cast.phase = 'charging';
+                cast.startAt = now;
+                let dirX = player.x - en.x, dirY = player.y - en.y;
+                const len = Math.hypot(dirX, dirY) || 1;
+                cast.dirX = dirX / len; cast.dirY = dirY / len;
+                return;
+            }
+            return;
+        }
+
+        if (cast.phase === 'charging') {
+            if (now - cast.startAt < cfg.chargeMs) return;
+            if (cast.abilityId === 'embestida') {
+                let dirX = player.x - en.x, dirY = player.y - en.y;
+                const len = Math.hypot(dirX, dirY) || 1;
+                dirX /= len; dirY /= len;
+                const dest = this.computeWalkableDestination(en.x, en.y, dirX, dirY, cfg.dashRange, en.radius);
+                en.bossCast = {
+                    abilityId: cast.abilityId, phase: 'dashing', startAt: now, durationMs: cfg.dashDurationMs,
+                    startX: en.x, startY: en.y, endX: dest.x, endY: dest.y, hitPlayer: false,
+                };
+            } else if (cast.abilityId === 'terremoto') {
+                // Corrección del usuario: el enemigo se queda QUIETO EN EL
+                // CENTRO durante TODA la secuencia (no solo la carga) —
+                // sigue en bossCast (fase 'earthquake') hasta que las 4
+                // bandas terminen de activarse, ver más abajo.
+                en.bossCast = {
+                    abilityId: cast.abilityId, phase: 'earthquake', startAt: now,
+                    x: en.x, y: en.y, firedRings: [false, false, false, false], lastFlash: null,
+                };
+            }
+            return;
+        }
+
+        if (cast.phase === 'dashing') {
+            const prevX = en.x, prevY = en.y;
+            const t = Math.min(1, (now - cast.startAt) / cast.durationMs);
+            en.x = cast.startX + (cast.endX - cast.startX) * t;
+            en.y = cast.startY + (cast.endY - cast.startY) * t;
+
+            // Chequeo defensivo por si el jugador se vuelve invisible A
+            // MITAD del dash (ya en curso) — el trigger de arriba
+            // (tryStartBossCast) solo cubre el caso de arrancar la
+            // habilidad estando ya invisible. Solo importa invisibleUntil
+            // (no la existencia del clon, que puede sobrevivir mucho más
+            // que la invisibilidad — mismo bug corregido arriba).
+            const playerHittable = !(this.player.invisibleUntil && now < this.player.invisibleUntil);
+            if (!cast.hitPlayer && playerHittable) {
+                const cp = closestPointOnSegment(player.x, player.y, prevX, prevY, en.x, en.y);
+                const dist = Math.hypot(player.x - cp.x, player.y - cp.y);
+                if (dist <= player.radius + en.radius) {
+                    cast.hitPlayer = true;
+                    const dealt = player.takeDamage(cfg.dashDmg);
+                    if (this.spawnFloatingText) this.spawnFloatingText(player.x, player.y - player.radius - 12, `-${dealt}`, cfg.color);
+                }
+            }
+
+            if (t >= 1) {
+                en.bossCast = null;
+                en.bossCastCooldownUntil = now + cfg.cooldownMs;
+            }
+            return;
+        }
+
+        if (cast.phase === 'earthquake') {
+            const elapsed = now - cast.startAt;
+            cfg.ringActivateDelaysMs.forEach((delay, i) => {
+                if (cast.firedRings[i] || elapsed < delay) return;
+                cast.firedRings[i] = true;
+                cast.lastFlash = { ringIndex: i, firedAt: now };
+                const innerR = i === 0 ? 0 : cfg.ringRadii[i - 1];
+                const outerR = cfg.ringRadii[i];
+                const dist = Math.hypot(player.x - cast.x, player.y - cast.y);
+                if (dist <= outerR && (i === 0 || dist > innerR)) {
+                    const dealt = player.takeDamage(cfg.ringDmg);
+                    if (this.spawnFloatingText) this.spawnFloatingText(player.x, player.y - player.radius - 12, `-${dealt}`, cfg.color);
+                    player.slowMod = { percent: cfg.slowPercent, expiresAt: now + cfg.slowDurationMs };
+                }
+            });
+            // Se libera recién EARTHQUAKE_RELEASE_DELAY_MS después del
+            // último destello, para que el jugador alcance a ver el
+            // último pulso antes de que el enemigo vuelva a moverse.
+            if (cast.firedRings.every(Boolean) && now - cast.lastFlash.firedAt >= 300) {
+                en.bossCast = null;
+                en.bossCastCooldownUntil = now + cfg.cooldownMs;
+            }
+        }
+    },
+
+    // Caos Dimensional (habilidad #3, ver BOSS_ABILITIES_3): cura
+    // healPercentPerSec cada healTickMs durante TODA la duración, mientras
+    // corren en paralelo la sub-secuencia de Rayo Arcano (x2 velocidad, 5
+    // repeticiones) y la de Zonas Arcanas (5 repeticiones) — termina
+    // recién cuando AMBAS marcan `done`.
+    tickCaosDimensional(en, now, dungeon) {
+        const cast = en.bossCast;
+        const cfg = BOSS_ABILITIES_3.caos_dimensional;
+
+        if (now - cast.lastHealTickAt >= cfg.healTickMs) {
+            cast.lastHealTickAt += cfg.healTickMs;
+            const healAmt = Math.round(en.maxHp * cfg.healPercentPerSec);
+            en.hp = Math.min(en.maxHp, en.hp + healAmt);
+            if (this.spawnFloatingText) this.spawnFloatingText(en.x, en.y - en.radius - 20, `+${healAmt}`, cfg.color, 800);
+        }
+
+        if (!cast.rayo.done) this.tickCaosRayoSub(en, cast.rayo, cfg.rayo, now);
+        if (!cast.zona.done) this.tickCaosZonaSub(en, cast.zona, cfg.zona, now);
+
+        if (cast.rayo.done && cast.zona.done) {
+            en.bossCast = null;
+            en.bossCast3CooldownUntil = now + cfg.cooldownMs;
+        }
+    },
+
+    // Sub-secuencia de Rayo Arcano dentro de Caos Dimensional — MISMA
+    // lógica que el Rayo Arcano de habilidad #1 (ver tickBossCast, rama
+    // 'rayo'), adaptada para operar sobre un sub-estado propio (`sub`,
+    // cast.rayo) en vez de en.bossCast directamente, y marcar `done` en
+    // vez de liberar al enemigo (Caos Dimensional lo libera recién cuando
+    // TAMBIÉN termina la sub-secuencia de zonas).
+    tickCaosRayoSub(en, sub, rcfg, now) {
+        const player = this.player;
+        if (sub.phase === 'charging') {
+            let dirX = player.x - en.x, dirY = player.y - en.y;
+            const len = Math.hypot(dirX, dirY) || 1;
+            sub.dirX = dirX / len; sub.dirY = dirY / len;
+            if (now - sub.startAt < rcfg.chargeMs) return;
+            sub.phase = 'firing';
+            sub.startAt = now;
+            return;
+        }
+        if (sub.phase === 'firing') {
+            if (now - sub.startAt < rcfg.fireMs) return;
+            const playerHittable = !(player.invisibleUntil && now < player.invisibleUntil);
+            if (playerHittable && isPointInBeam(player.x, player.y, en.x, en.y, sub.dirX, sub.dirY, rcfg.range, rcfg.lineSeparation / 2 + player.radius)) {
+                const dealt = player.takeDamage(rcfg.dmg);
+                if (this.spawnFloatingText) this.spawnFloatingText(player.x, player.y - player.radius - 12, `-${dealt}`, rcfg.color);
+            }
+            sub.phase = 'lingering';
+            sub.startAt = now;
+            return;
+        }
+        if (sub.phase === 'lingering') {
+            if (now - sub.startAt < rcfg.lingerMs) return;
+            if (sub.repeatIndex >= rcfg.repeats - 1) {
+                sub.done = true;
+            } else {
+                sub.repeatIndex++;
+                sub.phase = 'gap';
+                sub.startAt = now;
+            }
+            return;
+        }
+        if (sub.phase === 'gap') {
+            if (now - sub.startAt < rcfg.gapMs) return;
+            sub.phase = 'charging';
+            sub.startAt = now;
+            let dirX = player.x - en.x, dirY = player.y - en.y;
+            const len = Math.hypot(dirX, dirY) || 1;
+            sub.dirX = dirX / len; sub.dirY = dirY / len;
+        }
+    },
+
+    // Sub-secuencia de Zonas Arcanas dentro de Caos Dimensional: crece
+    // (50->150px, 1s, sigue al jugador) -> estática + titila (0.5s) ->
+    // se retrae (150->30px, 0.1s) -> explota (300px, misma animación de
+    // círculo creciente que el Ataque 3 del jugador) -> pausa (1s) ->
+    // repite sobre la posición ACTUAL del jugador, hasta `repeats` (5) veces.
+    tickCaosZonaSub(en, sub, zcfg, now) {
+        const player = this.player;
+        if (sub.phase === 'growing') {
+            sub.x = player.x; sub.y = player.y;
+            const t = Math.min(1, (now - sub.startAt) / zcfg.growMs);
+            sub.radius = zcfg.growStartRadius + (zcfg.growEndRadius - zcfg.growStartRadius) * t;
+            if (t < 1) return;
+            sub.phase = 'flicker';
+            sub.startAt = now;
+            return;
+        }
+        if (sub.phase === 'flicker') {
+            if (now - sub.startAt < zcfg.flickerMs) return;
+            sub.phase = 'retracting';
+            sub.startAt = now;
+            return;
+        }
+        if (sub.phase === 'retracting') {
+            const t = Math.min(1, (now - sub.startAt) / zcfg.retractMs);
+            sub.radius = zcfg.growEndRadius + (zcfg.retractRadius - zcfg.growEndRadius) * t;
+            if (t < 1) return;
+            const dist = Math.hypot(player.x - sub.x, player.y - sub.y);
+            const playerHittable = !(player.invisibleUntil && now < player.invisibleUntil);
+            if (playerHittable && dist <= zcfg.explosionRadius + player.radius) {
+                const dealt = player.takeDamage(zcfg.explosionDmg);
+                if (this.spawnFloatingText) this.spawnFloatingText(player.x, player.y - player.radius - 12, `-${dealt}`, zcfg.color);
+            }
+            this.effects.push({ kind: 'circle', x: sub.x, y: sub.y, followPlayer: false, range: zcfg.explosionRadius, startRange: 0, color: zcfg.color, createdAt: now, duration: 400 });
+            sub.phase = 'exploded';
+            sub.startAt = now;
+            return;
+        }
+        if (sub.phase === 'exploded') {
+            if (now - sub.startAt < zcfg.gapAfterExplosionMs) return;
+            if (sub.repeatIndex >= zcfg.repeats - 1) {
+                sub.done = true;
+            } else {
+                sub.repeatIndex++;
+                sub.phase = 'growing';
+                sub.startAt = now;
+                sub.x = player.x; sub.y = player.y;
+                sub.radius = zcfg.growStartRadius;
+            }
+        }
     },
 
     // ----- DISPARO DE ATAQUES DEL JUGADOR -----
@@ -858,6 +1344,28 @@ const Combat = {
         return best;
     },
 
+    // Teletransporte que SÍ puede atravesar paredes (Parpadeo Arcano del
+    // Mago, pedido explícito del usuario: "puede pasar paredes, si el
+    // rango lo permite") — a diferencia de computeWalkableDestination
+    // (dashes/saltos "físicos", se detienen en la primera pared), acá solo
+    // importa que el punto de LLEGADA sea caminable, no el camino entre
+    // medio. Si el punto exacto a `dist` cae dentro de una pared (ej. el
+    // mouse apuntaba justo ahí), busca hacia atrás — desde el destino
+    // hacia el jugador — el punto caminable más cercano, en vez de
+    // simplemente no teletransportar.
+    computeTeleportDestination(fromX, fromY, dirX, dirY, dist, radius) {
+        const dungeon = this.dungeon;
+        const targetX = fromX + dirX * dist, targetY = fromY + dirY * dist;
+        if (!dungeon || dungeon.isWalkable(targetX, targetY, radius)) return { x: targetX, y: targetY };
+        const steps = Math.max(1, Math.round(dist / 10));
+        for (let i = steps - 1; i >= 0; i--) {
+            const d = (i / steps) * dist;
+            const cx = fromX + dirX * d, cy = fromY + dirY * d;
+            if (dungeon.isWalkable(cx, cy, radius)) return { x: cx, y: cy };
+        }
+        return { x: fromX, y: fromY };
+    },
+
     // Arranca un dash/salto animado (ver tick en updateRealtime): interpola
     // player.x/y de start a end durante `durationMs`. `sweep:true` +
     // `onHitEnemy` detecta enemigos tocados a lo largo del camino (una vez
@@ -987,9 +1495,11 @@ const Combat = {
         this.skill1CooldownUntil = Date.now() + cfg.cooldownMs;
         // Se teletransporta hasta donde apuntaba el mouse si estaba MÁS
         // CERCA que el rango máximo (ver aimDist en fireSkill1) — no
-        // siempre salta al tope.
+        // siempre salta al tope. Puede ATRAVESAR paredes (pedido
+        // explícito): usa computeTeleportDestination, no
+        // computeWalkableDestination (esa es para dashes físicos).
         const teleportDist = Math.min(cfg.teleportRange, aimDist);
-        const dest = this.computeWalkableDestination(this.player.x, this.player.y, dirX, dirY, teleportDist, this.player.radius);
+        const dest = this.computeTeleportDestination(this.player.x, this.player.y, dirX, dirY, teleportDist, this.player.radius);
         this.player.x = dest.x;
         this.player.y = dest.y;
         this.skill1.mageDmgBuffUntil = Date.now() + cfg.dmgBuffDurationMs;
@@ -1162,7 +1672,7 @@ const Combat = {
             drawPreviewCircle(player.x, player.y, cfg.radius, cfg.color);
         } else if (profId === 'mago') {
             const teleportDist = Math.min(cfg.teleportRange, aimDist);
-            const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, teleportDist, player.radius);
+            const dest = this.computeTeleportDestination(player.x, player.y, dirX, dirY, teleportDist, player.radius);
             drawLine(dirX, dirY, Math.hypot(dest.x - player.x, dest.y - player.y), cfg.color);
             drawPreviewCircle(dest.x, dest.y, player.radius, cfg.color);
         } else if (profId === 'arquero') {
@@ -1886,6 +2396,207 @@ const Combat = {
         ctx.shadowBlur = 0;
     },
 
+    // Telegrafiado de las habilidades de jefe (ver BOSS_ABILITIES), 2 fases:
+    // - 'charging': círculo que empieza en radio(enemigo)+telegraphExtraRadius
+    //   y se achica hasta tocar al enemigo (radio(enemigo)) durante chargeMs
+    //   — "un círculo externo que se hace pequeño... hasta rodear y tocar
+    //   el enemigo", pedido explícito del usuario.
+    // - 'earthquake' (Terremoto): en vez de anillos estáticos, un único
+    //   círculo de "carga" que CRECE continuamente desde el borde interior
+    //   hasta el borde exterior de la banda que está resolviendo en ese
+    //   momento — al llegar al borde, esa banda se activa (ver
+    //   tickBossCast) y el círculo arranca de nuevo para la banda
+    //   siguiente. Corrección del usuario: un solo color (cfg.color,
+    //   carmesí oscuro) para las 4, más un destello breve justo al
+    //   activarse cada una.
+    // Habilidades #2 de jefe (ver BOSS_ABILITIES_2): Impenetrable dibuja
+    // 2 círculos punteados (para que la rotación se note — un círculo
+    // sólido y perfectamente simétrico no se vería girar) — uno a 195px
+    // SOLO visual girando horario, otro a 200px (el límite real) girando
+    // antihorario, pedido explícito. Frenesí Sangriento dibuja un aura
+    // simple (no se pidió un visual específico).
+    renderBossAbility2Effects(ctx) {
+        const now = Date.now();
+        this.enemies.forEach(en => {
+            if (!en.alive) return;
+            if (en.bossShield && now < en.bossShield.expiresAt) {
+                const cfg = BOSS_ABILITIES_2.impenetrable;
+                const elapsed = now - en.bossShield.startAt;
+                const rotSpeed = Math.PI; // una vuelta completa cada 2s
+                [
+                    { r: cfg.visualInnerRadius, angle: (elapsed / 1000) * rotSpeed },   // 195px, horario, solo visual
+                    { r: cfg.radius, angle: -(elapsed / 1000) * rotSpeed },              // 200px, antihorario, límite real
+                ].forEach(({ r, angle }) => {
+                    ctx.save();
+                    ctx.translate(en.x, en.y);
+                    ctx.rotate(angle);
+                    ctx.strokeStyle = cfg.color;
+                    ctx.lineWidth = 3;
+                    ctx.globalAlpha = 0.75;
+                    ctx.setLineDash([20, 15]);
+                    ctx.beginPath();
+                    ctx.arc(0, 0, r, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.globalAlpha = 1;
+                    ctx.restore();
+                });
+            }
+            if (en.frenzy && now < en.frenzy.expiresAt) {
+                const cfg = BOSS_ABILITIES_2.frenesi;
+                ctx.beginPath();
+                ctx.arc(en.x, en.y, en.radius + 6, 0, Math.PI * 2);
+                ctx.strokeStyle = cfg.color;
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.8;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            }
+        });
+    },
+
+    renderBossCastTelegraphs(ctx) {
+        const now = Date.now();
+        this.enemies.forEach(en => {
+            if (!en.alive || !en.bossCast) return;
+            const cast = en.bossCast;
+            if (cast.abilityId === 'caos_dimensional') {
+                this.renderCaosDimensional(ctx, en, cast, now);
+                return;
+            }
+            const cfg = BOSS_ABILITIES[cast.abilityId];
+            if (cast.abilityId === 'rayo') {
+                this.renderRayoArcano(ctx, en, cast, cfg, now);
+            } else if (cast.phase === 'charging') {
+                const t = Math.min(1, (now - cast.startAt) / cfg.chargeMs);
+                const r = en.radius + cfg.telegraphExtraRadius * (1 - t);
+                ctx.beginPath();
+                ctx.arc(en.x, en.y, r, 0, Math.PI * 2);
+                ctx.strokeStyle = cfg.color;
+                ctx.lineWidth = 3;
+                ctx.globalAlpha = 0.85;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+            } else if (cast.phase === 'earthquake') {
+                this.renderEarthquakeGrowth(ctx, cast, cfg, now);
+            }
+        });
+    },
+
+    // Caos Dimensional: dibuja las 2 sub-secuencias en paralelo — el Rayo
+    // Arcano reutiliza EXACTAMENTE renderRayoArcano (el sub-estado
+    // cast.rayo tiene la misma forma que un cast normal de 'rayo': phase/
+    // startAt/dirX/dirY) y la Zona Arcana su propio render.
+    renderCaosDimensional(ctx, en, cast, now) {
+        const cfg = BOSS_ABILITIES_3.caos_dimensional;
+        if (!cast.rayo.done) this.renderRayoArcano(ctx, en, cast.rayo, cfg.rayo, now);
+        if (!cast.zona.done) this.renderCaosZona(ctx, cast.zona, cfg.zona, now);
+    },
+
+    // Zona Arcana: círculo que crece/está estático/titila/se retrae según
+    // su fase (ver tickCaosZonaSub) — el titileo usa el mismo patrón que
+    // el titileo del Rayo Arcano (alternar opacidad cada 50ms).
+    renderCaosZona(ctx, sub, zcfg, now) {
+        if (sub.phase === 'exploded') return;
+        let alpha = 0.7;
+        if (sub.phase === 'flicker') {
+            alpha = Math.floor((now - sub.startAt) / 50) % 2 === 0 ? 0.85 : 0.2;
+        }
+        ctx.beginPath();
+        ctx.arc(sub.x, sub.y, sub.radius, 0, Math.PI * 2);
+        ctx.strokeStyle = zcfg.color;
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = alpha;
+        ctx.stroke();
+        ctx.globalAlpha = 0.15 * alpha;
+        ctx.fillStyle = zcfg.color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+    },
+
+    // Rayo Arcano: 2 líneas de `range` px que se van CERRANDO (30px -> 0)
+    // durante la carga (1s) y luego reabriendo (0 -> 30px) durante el
+    // disparo (0.5s), con un relleno semitransparente entre ellas durante
+    // el disparo (creciendo junto con la separación). Tras dispararse, el
+    // rayo se queda totalmente abierto TITILANDO (alternando opacidad)
+    // durante lingerMs (0.2s) — pedido explícito del usuario. Nada
+    // visible durante la pausa entre repeticiones.
+    renderRayoArcano(ctx, en, cast, cfg, now) {
+        if (cast.phase === 'gap') return;
+        const elapsed = now - cast.startAt;
+        const maxHalfSep = cfg.lineSeparation / 2;
+        let halfSep, flickerAlpha = 1;
+        if (cast.phase === 'charging') {
+            const t = Math.min(1, elapsed / cfg.chargeMs);
+            halfSep = maxHalfSep * (1 - t);
+        } else if (cast.phase === 'firing') {
+            const t = Math.min(1, elapsed / cfg.fireMs);
+            halfSep = maxHalfSep * t;
+        } else { // 'lingering'
+            halfSep = maxHalfSep;
+            flickerAlpha = Math.floor(elapsed / 50) % 2 === 0 ? 1 : 0.2;
+        }
+        ctx.save();
+        ctx.translate(en.x, en.y);
+        ctx.rotate(Math.atan2(cast.dirY, cast.dirX));
+        if ((cast.phase === 'firing' || cast.phase === 'lingering') && halfSep > 0.5) {
+            ctx.fillStyle = cfg.color;
+            ctx.globalAlpha = 0.25 * flickerAlpha;
+            ctx.fillRect(0, -halfSep, cfg.range, halfSep * 2);
+        }
+        ctx.strokeStyle = cfg.color;
+        ctx.lineWidth = 3;
+        ctx.globalAlpha = 0.9 * flickerAlpha;
+        [halfSep, -halfSep].forEach(offset => {
+            ctx.beginPath();
+            ctx.moveTo(0, offset);
+            ctx.lineTo(cfg.range, offset);
+            ctx.stroke();
+        });
+        ctx.globalAlpha = 1;
+        ctx.restore();
+    },
+
+    // Dibuja la banda actualmente "cargando" de un Terremoto (ver
+    // renderBossCastTelegraphs) más el destello de la última banda activada.
+    renderEarthquakeGrowth(ctx, cast, cfg, now) {
+        const elapsed = now - cast.startAt;
+        const delays = cfg.ringActivateDelaysMs, radii = cfg.ringRadii;
+        let bandIndex = -1;
+        for (let i = 0; i < delays.length; i++) {
+            if (elapsed < delays[i]) { bandIndex = i; break; }
+        }
+        if (bandIndex !== -1) {
+            const bandStart = bandIndex === 0 ? 0 : radii[bandIndex - 1];
+            const bandEnd = radii[bandIndex];
+            const prevDelay = bandIndex === 0 ? 0 : delays[bandIndex - 1];
+            const progress = Math.min(1, (elapsed - prevDelay) / (delays[bandIndex] - prevDelay));
+            const r = bandStart + (bandEnd - bandStart) * progress;
+            ctx.beginPath();
+            ctx.arc(cast.x, cast.y, r, 0, Math.PI * 2);
+            ctx.strokeStyle = cfg.color;
+            ctx.lineWidth = 4;
+            ctx.globalAlpha = 0.9;
+            ctx.stroke();
+            ctx.globalAlpha = 0.15;
+            ctx.fillStyle = cfg.color;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+        if (cast.lastFlash && now - cast.lastFlash.firedAt < 300) {
+            const i = cast.lastFlash.ringIndex;
+            const innerR = i === 0 ? 0 : radii[i - 1];
+            const outerR = radii[i];
+            ctx.beginPath();
+            ctx.arc(cast.x, cast.y, outerR, 0, Math.PI * 2);
+            if (innerR > 0) ctx.arc(cast.x, cast.y, innerR, 0, Math.PI * 2, true);
+            ctx.fillStyle = cfg.color;
+            ctx.globalAlpha = 0.4 * (1 - (now - cast.lastFlash.firedAt) / 300);
+            ctx.fill();
+            ctx.globalAlpha = 1;
+        }
+    },
+
     // Enemigos dentro de un cono frontal (usado por Ataque 1/2).
     getEnemiesInCone(originX, originY, dirX, dirY, range, angleDeg) {
         const halfAngleRad = (angleDeg / 2) * Math.PI / 180;
@@ -2509,10 +3220,13 @@ const Combat = {
         if (this.dash3 && this.dash3.profId === 'guerrero') {
             return;
         }
-        // Doble Sombra del Pícaro: con clon vivo, el golpe va contra ÉL
-        // (ver performEnemyAttackOnClone); sin clon pero todavía invisible,
-        // el jugador real no es alcanzable — el golpe no conecta con nada.
-        if (this.picaroClone) {
+        // Doble Sombra del Pícaro: con clon vivo Y la invisibilidad TODAVÍA
+        // activa, el golpe va contra ÉL (ver performEnemyAttackOnClone);
+        // sin clon pero todavía invisible, el jugador real no es
+        // alcanzable — el golpe no conecta con nada. Mismo bug corregido
+        // que en el aiTarget de arriba: un clon que sobrevive más de 3s ya
+        // NO debe seguir absorbiendo golpes una vez pasa la invisibilidad.
+        if (this.picaroClone && this.player.invisibleUntil && Date.now() < this.player.invisibleUntil) {
             this.performEnemyAttackOnClone(enemy);
             return;
         }
@@ -2530,6 +3244,12 @@ const Combat = {
         // Bastión del Tanque (ver RT_SKILL1_ABILITIES.tanque): -30% de daño
         // mientras el enemigo esté parado dentro del círculo.
         baseDmg = Math.round(baseDmg * this.getEnemyZoneDamageMultiplier(enemy));
+        // Frenesí Sangriento (habilidad #2 de jefe, ver BOSS_ABILITIES_2):
+        // +dmgBonusPercent también cuando, a falta de otros enemigos
+        // cerca, cae de vuelta a atacar al jugador (ver Combat.tickFrenzy).
+        if (enemy.frenzy && Date.now() < enemy.frenzy.expiresAt) {
+            baseDmg = Math.round(baseDmg * (1 + BOSS_ABILITIES_2.frenesi.dmgBonusPercent));
+        }
 
         const player = this.player;
         const shield = player.shield;
@@ -2566,6 +3286,10 @@ const Combat = {
         if (!dodged) {
             if (enemy.type.ability === 'lifesteal') {
                 const healAmt = Math.round(dmg * 0.2);
+                enemy.hp = Math.min(enemy.maxHp, enemy.hp + healAmt);
+            }
+            if (enemy.frenzy && Date.now() < enemy.frenzy.expiresAt && dmg > 0) {
+                const healAmt = Math.round(dmg * BOSS_ABILITIES_2.frenesi.lifestealPercent);
                 enemy.hp = Math.min(enemy.maxHp, enemy.hp + healAmt);
             }
             if (enemy.type.ability === 'burnOnHit') {
@@ -2734,7 +3458,74 @@ const Combat = {
         }
     },
 
+    // División Celular (ver BOSS_ABILITIES_2.division_celular): crea los 2
+    // fragmentos que reemplazan a `target` (que "murió" pero en realidad
+    // se divide, ver Enemy.takeDamage). tier1 (mitad, 50% de la vida
+    // máxima ORIGINAL) retiene la habilidad #1 asignada Y división
+    // celular (para poder volver a dividirse); tier2 (cuarto, 25%, YA no
+    // se divide más) pierde la habilidad #1 pero gana +50% de velocidad
+    // (ver Enemy.stepToward). Los 4 tier2 finales comparten un contador
+    // (`divisionGroup`) creado acá, en el PRIMER split — se propaga por
+    // referencia a través de ambas generaciones para que
+    // Combat.onEnemyDefeated sepa cuándo otorgar el loot real.
+    spawnDivisionClones(target) {
+        const cfg = BOSS_ABILITIES_2.division_celular;
+        const newTier = target.divisionTier + 1;
+        const isTier2 = newTier >= 2;
+        const hpPercent = isTier2 ? cfg.tier2HpPercent : cfg.tier1HpPercent;
+        const newMaxHp = Math.max(1, Math.round(target.originalMaxHp * hpPercent));
+        const radiusScale = isTier2 ? 0.6 : 0.8;
+        const group = target.divisionGroup || { remaining: 4 };
+
+        for (let i = 0; i < 2; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const offset = 30 + Math.random() * 20;
+            const newRadius = Math.max(6, Math.round(target.type.radius * radiusScale));
+            let px = target.x + Math.cos(angle) * offset, py = target.y + Math.sin(angle) * offset;
+            if (this.dungeon && !this.dungeon.isWalkable(px, py, newRadius)) { px = target.x; py = target.y; }
+
+            const cloneType = {
+                ...target.type,
+                hp: newMaxHp,
+                radius: newRadius,
+                bossAbilityIds: isTier2 ? [] : target.type.bossAbilityIds,
+                bossAbility2Id: isTier2 ? null : target.type.bossAbility2Id,
+                name: `${target.type.name} (fragmento)`,
+            };
+            const clone = new Enemy(cloneType, px, py);
+            clone.originalMaxHp = target.originalMaxHp;
+            clone.divisionTier = newTier;
+            // El grupo se crea UNA vez (en el split tier0->tier1) y se
+            // propaga sin cambios a través de tier1 hasta llegar a los 4
+            // tier2 finales — si solo se lo diera a los tier2, cada
+            // tier1 crearía su PROPIO grupo de 4 en vez de compartir el
+            // mismo entre las dos ramas (bug real, encontrado al revisar
+            // esta misma función antes de probarla).
+            clone.divisionGroup = group;
+            clone.linkedChest = target.linkedChest;
+            this.enemies.push(clone);
+        }
+    },
+
     onEnemyDefeated(target) {
+        // División Celular (habilidad #2 de jefe, ver BOSS_ABILITIES_2):
+        // el jefe (tier0) o sus mitades (tier1) NO mueren de verdad —
+        // Enemy.takeDamage ya marcó pendingDivision en vez de matarlo del
+        // todo. Reemplaza por completo el resto de esta función (nada de
+        // loot/XP todavía).
+        if (target.pendingDivision) {
+            this.spawnDivisionClones(target);
+            return;
+        }
+        // Los 4 fragmentos tier2 finales comparten un contador (ver
+        // spawnDivisionClones): recién cuando muere el ÚLTIMO se cae al
+        // flujo normal de abajo y se otorga el loot/XP completo, UNA sola
+        // vez, como si fuera 1 sola muerte del jefe original.
+        if (target.divisionGroup) {
+            target.divisionGroup.remaining--;
+            if (target.divisionGroup.remaining > 0) return;
+        }
+
         const player = this.player;
         const rarity = target.type.rarity || MONSTER_RARITIES[0];
         const bossKind = target.type.bossKind;

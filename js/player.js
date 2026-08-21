@@ -99,6 +99,11 @@ class Player {
         // dure, ningún enemigo lo ataca. Combate-only, no se persiste.
         this.invisibleUntil = 0;
 
+        // Ralentización (ver Terremoto de las habilidades de jefe,
+        // Combat.tickEarthquakes/BOSS_ABILITIES) — mismo formato que
+        // Enemy.speedMod. Combate-only, no se persiste.
+        this.slowMod = null; // { percent, expiresAt }
+
         this.levelUpFlashes = []; // {professionId, until}
         this._foodTurnRegenTickAt = 0; // ver getFoodTurnRegen/tick(): antes curaba 1 vez por turno, ahora 1 vez/seg
 
@@ -660,7 +665,8 @@ class Player {
         // Retirada Certera (ver RT_SKILL1_ABILITIES.arquero/
         // Combat.getSkill1SpeedBonusPercent) — 0 si no aplica.
         const skillSpeedBonus = Combat.getSkill2SpeedBonusPercent(this.activeProfession) + Combat.getSkill1SpeedBonusPercent(this.activeProfession);
-        return this.baseSpeed * (1 + (mount ? mount.speedPercent : 0) / 100) * (1 + skillSpeedBonus);
+        const slowPenalty = (this.slowMod && Date.now() < this.slowMod.expiresAt) ? this.slowMod.percent : 0;
+        return this.baseSpeed * (1 + (mount ? mount.speedPercent : 0) / 100) * (1 + skillSpeedBonus) * (1 - slowPenalty);
     }
 
     // ----- BANCO DE NÚCLEOS (craftear/descraftear rareza, mismo Tier) -----
