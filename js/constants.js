@@ -464,18 +464,55 @@ const ENEMY_TYPES = [
 
 function getEnemyType(id) { return ENEMY_TYPES.find(e => e.id === id); }
 
+// ----- ESCALADO DE DAÑO DE ENEMIGOS POR PISO (pedido explícito del usuario) -----
+// "Cada piso ≈ 1 nivel del jugador": el nivel TEÓRICO en el piso F es F-1
+// (el jugador arranca en nivel 0 en el piso 1 — mismo criterio que
+// Player.recalcMaxHp: maxHp = 100 + nivel*10). Esta es la vida TEÓRICA usada
+// solo para calibrar el daño de los enemigos, sin constitución/comida/etc —
+// el propio pedido aclara que en la práctica el jugador puede tener más
+// vida real (constitución) y menos daño real recibido (resistencias de
+// armadura/habilidades), esto es solo la vara de medir para el daño base.
+function getTheoreticalPlayerMaxHp(floor) {
+    return 100 + (floor - 1) * 10;
+}
+// Golpes que un enemigo COMÚN necesita para matar al jugador: arranca en 20
+// (pisos 1-100) y baja 1 golpe cada 100 pisos (piso 901 -> 20-9=11, ejemplo
+// dado por el usuario) — mínimo 1 golpe (nunca menos, evita que la fórmula
+// se vuelva absurda en pisos muy altos).
+function getCommonHitsToKill(floor) {
+    const block = Math.floor((floor - 1) / 100);
+    return Math.max(1, 20 - block);
+}
+// Daño de un enemigo COMÚN en este piso: la vida teórica del jugador entre
+// los golpes que le toma matarlo — NO depende del tipo de monstruo (todo
+// común en el mismo piso hace el mismo daño, ver getScaledEnemyStats en
+// floors.js, que reemplaza la vieja fórmula lineal sobre el dmg propio de
+// cada ENEMY_TYPES). El resto de rarezas/jefes son un múltiplo FIJO de este
+// valor (ver MONSTER_RARITIES[].dmgMult/BOSS_TIERS.dmgMult), calibrado con
+// los anclajes de piso 1 dados por el usuario: común=5, poco común=6,
+// raro=7, épico=8, legendario=9, mítico=10, minijefe=11, jefe=15, jefe
+// final=20 -> ratios 1.0/1.2/1.4/1.6/1.8/2.0/2.2/3.0/4.0 sobre el común.
+function getCommonEnemyDamageForFloor(floor) {
+    return getTheoreticalPlayerMaxHp(floor) / getCommonHitsToKill(floor);
+}
+
 // ----- RAREZA DE MONSTRUOS (6 niveles) -----
 // Se sortea una vez por enemigo al generarlo (ver loadFloor en game.js).
-// Cada nivel es 10% más fuerte (hp/dmg) que el anterior, en cadena (1.10^n).
+// `mult`: bono de HP, 10% más fuerte que el anterior, en cadena (1.10^n) —
+// SIN CAMBIOS, el pedido no dio una fórmula de vida, solo de daño.
+// `dmgMult`: bono de DAÑO — separado de `mult` a propósito (mismo criterio
+// que BOSS_TIERS.dmgMult) porque ahora sigue una curva LINEAL distinta
+// (1.0/1.2/1.4/.../2.0, +20% del daño de un común por nivel de rareza),
+// pedida explícitamente por el usuario, ver getCommonEnemyDamageForFloor.
 // `attackIntervalMs`: cada cuánto ataca (ver Combat.updateRealtime) — NO
 // depende del nivel/piso, solo de la rareza (a mayor rareza, más rápido).
 const MONSTER_RARITIES = [
-    { id: 'comun',       name: 'Común',       color: '#9a9a9a', chance: 50,  mult: 1,             attackIntervalMs: 1000 },
-    { id: 'poco_comun',  name: 'Poco Común',  color: '#3ecf5e', chance: 30,  mult: 1.1,           attackIntervalMs: 900 },
-    { id: 'raro',        name: 'Raro',        color: '#3f9dff', chance: 13,  mult: 1.1 ** 2,      attackIntervalMs: 800 },
-    { id: 'epico',       name: 'Épico',       color: '#a64fff', chance: 5,   mult: 1.1 ** 3,      attackIntervalMs: 700 },
-    { id: 'legendario',  name: 'Legendario',  color: '#ffcf3f', chance: 1.5, mult: 1.1 ** 4,      attackIntervalMs: 600 },
-    { id: 'mitico',      name: 'Mítico',      color: '#e93cff', chance: 0.5, mult: 1.1 ** 5,      attackIntervalMs: 500 },
+    { id: 'comun',       name: 'Común',       color: '#9a9a9a', chance: 50,  mult: 1,             dmgMult: 1.0, attackIntervalMs: 1000 },
+    { id: 'poco_comun',  name: 'Poco Común',  color: '#3ecf5e', chance: 30,  mult: 1.1,           dmgMult: 1.2, attackIntervalMs: 900 },
+    { id: 'raro',        name: 'Raro',        color: '#3f9dff', chance: 13,  mult: 1.1 ** 2,      dmgMult: 1.4, attackIntervalMs: 800 },
+    { id: 'epico',       name: 'Épico',       color: '#a64fff', chance: 5,   mult: 1.1 ** 3,      dmgMult: 1.6, attackIntervalMs: 700 },
+    { id: 'legendario',  name: 'Legendario',  color: '#ffcf3f', chance: 1.5, mult: 1.1 ** 4,      dmgMult: 1.8, attackIntervalMs: 600 },
+    { id: 'mitico',      name: 'Mítico',      color: '#e93cff', chance: 0.5, mult: 1.1 ** 5,      dmgMult: 2.0, attackIntervalMs: 500 },
 ];
 
 function rollMonsterRarity() {
@@ -491,19 +528,19 @@ function rollMonsterRarity() {
 function getMonsterRarity(id) { return MONSTER_RARITIES.find(r => r.id === id) || MONSTER_RARITIES[0]; }
 
 // ----- JEFES DINÁMICOS (aparecen al matar enemigos, no al generar el piso) -----
-// mult: multiplicador de HP/XP sobre el enemigo base ya escalado al piso.
-// dmgMult: multiplicador de DAÑO — separado de `mult` a propósito (antes
-// compartían el mismo número, lo que disparaba el daño de piso 1 muy por
-// encima del objetivo pedido: ~200 de daño en vez de 60-70). Calibrado
-// junto con los nuevos valores base de ENEMY_TYPES para que, en el piso 1:
-// minijefe caiga ~25-30, jefe ~30-40, jefe final ~60-70 (ver
-// spawnDynamicBoss/spawnFinalBossEntity en game.js).
+// mult: multiplicador de HP/XP sobre el enemigo base ya escalado al piso —
+// SIN CAMBIOS, el pedido no dio una fórmula de vida para jefes.
+// dmgMult: multiplicador de DAÑO sobre el daño de un COMÚN en ese piso (ver
+// getCommonEnemyDamageForFloor) — recalibrado a los anclajes de piso 1
+// dados por el usuario: minijefe=11 (11/5=2.2), jefe=15 (15/5=3.0), jefe
+// final=20 (20/5=4.0, ver spawnFinalBossEntity: es el pico del rango de 10
+// pisos, con rangeFactor 0.5-1.0 según qué tan adentro esté ese piso).
 // radiusMult: qué tan grande es el círculo respecto a un enemigo normal.
 // chance: probabilidad de aparecer cada vez que se elimina 1 enemigo (minijefe/jefe).
 const BOSS_TIERS = {
-    minijefe:   { label: 'Minijefe',           rarities: ['poco_comun', 'raro'], mult: 2,  dmgMult: 1.6, chance: 0.20, radiusMult: 1.5 },
-    jefe:       { label: 'Jefe',               rarities: ['epico', 'legendario'], mult: 4,  dmgMult: 2.0, chance: 0.10, radiusMult: 2 },
-    jefe_final: { label: 'Jefe Final',          rarities: ['mitico'],              mult: 10, dmgMult: 7.5, radiusMult: 3 },
+    minijefe:   { label: 'Minijefe',           rarities: ['poco_comun', 'raro'], mult: 2,  dmgMult: 2.2, chance: 0.20, radiusMult: 1.5 },
+    jefe:       { label: 'Jefe',               rarities: ['epico', 'legendario'], mult: 4,  dmgMult: 3.0, chance: 0.10, radiusMult: 2 },
+    jefe_final: { label: 'Jefe Final',          rarities: ['mitico'],              mult: 10, dmgMult: 4.0, radiusMult: 3 },
 };
 
 // ----- JEFE FINAL: sistema de puntos (desbloqueo) -----
@@ -541,6 +578,159 @@ MONSTER_RARITIES.forEach(r => {
         MATERIAL_INFO[getNucleoId(r.id, t.id)] = { name: `Núcleo ${r.name} Tier ${t.id}`, emoji: CORE_EMOJI[r.id] };
     });
 });
+
+// ===== SISTEMA DE ARMADURA (3 piezas: casco/pechera/botas) =====
+// Reemplaza la vieja armadura de 1 sola pieza (profId 'armadura', que sigue
+// existiendo en PROFESSIONS solo para nombrar la armadura "automática" de
+// respaldo cuando no hay NINGUNA pieza equipada, ver Player.getArmorInfo).
+// Cada pieza otorga sus PROPIOS bonos (no se comparten entre piezas), según
+// su variante de peso y su Rareza — valores dados por el usuario (base =
+// Común), escalados +1 nivel de rareza según su propia tabla explícita.
+const ARMOR_SLOTS = [
+    { id: 'casco', name: 'Casco', emoji: '🪖' },
+    { id: 'pechera', name: 'Pechera', emoji: '🦺' },
+    { id: 'botas', name: 'Botas', emoji: '🥾' },
+];
+const ARMOR_PIECE_VARIANTS = {
+    ligera: {
+        name: 'Ligera', emoji: '🍃',
+        statsByRarity: {
+            comun:      { defense: 1, dmgBonusPercent: 0.03, hpBonusPercent: 0 },
+            poco_comun: { defense: 2, dmgBonusPercent: 0.04, hpBonusPercent: 0 },
+            raro:       { defense: 2, dmgBonusPercent: 0.05, hpBonusPercent: 0 },
+            epico:      { defense: 3, dmgBonusPercent: 0.06, hpBonusPercent: 0 },
+            legendario: { defense: 3, dmgBonusPercent: 0.07, hpBonusPercent: 0 },
+            mitico:     { defense: 4, dmgBonusPercent: 0.08, hpBonusPercent: 0 },
+        },
+    },
+    media: {
+        name: 'Media', emoji: '⚖️',
+        statsByRarity: {
+            comun:      { defense: 1, dmgBonusPercent: 0.01, hpBonusPercent: 0.01 },
+            poco_comun: { defense: 2, dmgBonusPercent: 0.02, hpBonusPercent: 0.02 },
+            raro:       { defense: 2, dmgBonusPercent: 0.03, hpBonusPercent: 0.02 },
+            epico:      { defense: 3, dmgBonusPercent: 0.04, hpBonusPercent: 0.03 },
+            legendario: { defense: 3, dmgBonusPercent: 0.05, hpBonusPercent: 0.03 },
+            mitico:     { defense: 4, dmgBonusPercent: 0.06, hpBonusPercent: 0.04 },
+        },
+    },
+    pesada: {
+        name: 'Pesada', emoji: '🛡️',
+        statsByRarity: {
+            comun:      { defense: 3, dmgBonusPercent: 0, hpBonusPercent: 0.03 },
+            poco_comun: { defense: 4, dmgBonusPercent: 0, hpBonusPercent: 0.04 },
+            raro:       { defense: 4, dmgBonusPercent: 0, hpBonusPercent: 0.05 },
+            epico:      { defense: 5, dmgBonusPercent: 0, hpBonusPercent: 0.06 },
+            legendario: { defense: 5, dmgBonusPercent: 0, hpBonusPercent: 0.07 },
+            mitico:     { defense: 6, dmgBonusPercent: 0, hpBonusPercent: 0.08 },
+        },
+    },
+};
+function getArmorPieceStats(subtype, rarityId) {
+    const variant = ARMOR_PIECE_VARIANTS[subtype];
+    return variant ? variant.statsByRarity[rarityId] : null;
+}
+// Costo FIJO para craftear 1 pieza de armadura terminada (casco/pechera/
+// botas), sin importar tier/rareza — regla dada explícitamente por el
+// usuario, a diferencia del costo de armas/monturas que sí escala con el tier.
+const ARMOR_CRAFT_ORE_COST = 30;
+const ARMOR_CRAFT_PIECE_COST = 5;
+
+// Nivel MÍNIMO DEL JUGADOR (no del piso) para EQUIPAR una pieza de armadura
+// de un material/rareza dados: (tierId-1)*100 + 1 + índiceDeRareza*10.
+// Ejemplo dado por el usuario: hierro (tier 2) común=101, raro=121,
+// épico=131, legendario=141, mítico=151 (para "poco común" el usuario
+// escribió 110, pero sus propios ejemplos de raro/épico/legendario/mítico
+// solo son consistentes entre sí con 111 — se usa ese valor, ver resumen).
+function getArmorEquipMinLevel(tierId, rarityId) {
+    const rarityIdx = Math.max(0, MONSTER_RARITIES.findIndex(r => r.id === rarityId));
+    return (tierId - 1) * 100 + 1 + rarityIdx * 10;
+}
+
+// Piezas de armadura CRUDAS (materia prima, dropeada por enemigos, ver
+// Combat.onEnemyDefeated): id = pieza_<subtipo>_<rareza>_tier<N>, apiladas
+// como cualquier material (player.materials) — mismo patrón que los
+// núcleos de monstruo. El "nivel" 1-10 de la pieza es el mismo `tierId` de
+// TIERS/MATERIAL_TIER_BRACKETS (1 nivel cada 100 pisos).
+const ARMOR_PIECE_EMOJI = { ligera: '🍃', media: '⚖️', pesada: '🛡️' };
+function getArmorPieceId(subtype, rarityId, tierId) { return `pieza_${subtype}_${rarityId}_tier${tierId}`; }
+Object.keys(ARMOR_PIECE_VARIANTS).forEach(subtype => {
+    MONSTER_RARITIES.forEach(rarity => {
+        TIERS.forEach(t => {
+            MATERIAL_INFO[getArmorPieceId(subtype, rarity.id, t.id)] = {
+                name: `Pieza ${ARMOR_PIECE_VARIANTS[subtype].name} ${rarity.name} Nv.${t.id}`,
+                emoji: ARMOR_PIECE_EMOJI[subtype],
+            };
+        });
+    });
+});
+
+// Drop de piezas de EQUIPO (armadura Y arma, ver más abajo
+// WEAPON_PIECE_TYPES — "todo el % de drop y funcionamiento es exactamente
+// igual" para ambas, pedido explícito) al matar un enemigo (ver
+// Combat.onEnemyDefeated): una pieza de rareza R solo puede dropear de un
+// enemigo de rareza R o SUPERIOR (ej. una pieza épica puede dropear de un
+// enemigo épico, legendario o mítico, nunca de uno común/poco común/raro)
+// — por eso se evalúan TODAS las rarezas <= la del enemigo muerto, cada
+// una con su propia probabilidad/cantidad, de forma independiente (un
+// enemigo mítico puede soltar piezas de varias rarezas distintas en la
+// misma muerte). `comun` es un caso especial: 1 pieza GARANTIZADA + 4
+// tiradas independientes adicionales al mismo % (dado explícitamente por
+// el usuario); el resto es "chance% de soltar algo, y si sale, cantidad
+// uniforme entre min y max".
+const EQUIPMENT_PIECE_DROP_CONFIG = {
+    comun:      { guaranteed: 1, extraRolls: 4, chancePerRoll: 0.40 },
+    poco_comun: { chance: 0.40, min: 1, max: 5 },
+    raro:       { chance: 0.50, min: 1, max: 5 },
+    epico:      { chance: 0.20, min: 1, max: 3 },
+    legendario: { chance: 0.20, min: 1, max: 3 },
+    mitico:     { chance: 0.10, min: 1, max: 3 },
+};
+// +3% de probabilidad de drop (a TODAS las piezas de equipo, todas las
+// rarezas) cada 10 pisos (piso 11 -> +3%, piso 21 -> +6%, piso 31 -> +9%,
+// ejemplo dado por el usuario con el mítico 10%->13%->16%->19%).
+function getPieceDropBonusPercent(floor) {
+    return 0.03 * Math.floor((floor - 1) / 10);
+}
+
+// ===== SISTEMA DE PIEZAS DE ARMA (armas de combate: mago/guerrero/
+// picaro/tanque/arquero/barbaro) — mismo patrón que las piezas de
+// armadura (drop/rareza/tope por rareza del enemigo/+3% cada 10 pisos, ver
+// arriba), solo cambia QUÉ se craftea con ellas: reemplaza el viejo
+// crafteo de armas (costo escalado por tier + 1 núcleo) por un costo FIJO
+// + piezas, igual criterio que la armadura del pedido anterior. Las
+// herramientas de recolección (leñador/minero/campesino) NO tienen pieza
+// propia — siguen crafteándose con el sistema viejo (núcleos), ver
+// Player.craftItem.
+const WEAPON_PIECE_TYPES = {
+    mago: { name: 'Báculo', emoji: '🧙' },
+    guerrero: { name: 'Espadas', emoji: '⚔️' },
+    picaro: { name: 'Dagas', emoji: '🗡️' },
+    tanque: { name: 'Martillo y Escudo', emoji: '🔨' },
+    arquero: { name: 'Arco', emoji: '🏹' },
+    barbaro: { name: 'Hachas', emoji: '🪓' },
+};
+// Piezas de arma CRUDAS (materia prima, dropeada por enemigos): id =
+// pieza_arma_<profId>_<rareza>_tier<N> — el "nivel" 1-10 es el mismo
+// tierId de TIERS/MATERIAL_TIER_BRACKETS que las piezas de armadura.
+function getWeaponPieceId(profId, rarityId, tierId) { return `pieza_arma_${profId}_${rarityId}_tier${tierId}`; }
+Object.keys(WEAPON_PIECE_TYPES).forEach(profId => {
+    MONSTER_RARITIES.forEach(rarity => {
+        TIERS.forEach(t => {
+            MATERIAL_INFO[getWeaponPieceId(profId, rarity.id, t.id)] = {
+                name: `Pieza de ${WEAPON_PIECE_TYPES[profId].name} ${rarity.name} Nv.${t.id}`,
+                emoji: WEAPON_PIECE_TYPES[profId].emoji,
+            };
+        });
+    });
+});
+// Costo FIJO para craftear 1 arma de combate terminada (reemplaza
+// getCraftMaterialCost para las 6 profesiones de combate — las
+// herramientas de recolección siguen con el costo escalado viejo): 25 de
+// mena + 25 de madera del tier + 5 piezas de esa MISMA profesión/rareza/tier.
+const WEAPON_CRAFT_ORE_COST = 25;
+const WEAPON_CRAFT_WOOD_COST = 25;
+const WEAPON_CRAFT_PIECE_COST = 5;
 
 // Materiales de crafteo por tier (Bronce..Adamantite), obtenidos recolectando
 // nodos de recursos: el piso actual determina qué tier de material sueltan.
@@ -951,30 +1141,137 @@ const RT_SKILL3_ABILITIES = {
         dmgScalePerPixelBeyond200: 0.08,
         cooldownMs: 6000, killDmgBuffPercent: 0.10, killDmgBuffDurationMs: 10000,
     },
-    // Pícaro — Golpe de Ejecución: dash CORTO (150px, 0.1s, duración fija —
-    // a diferencia del vórtice/flecha, no viaja a "velocidad constante", es
-    // el mismo estilo de dash instantáneo que su propia Estocada Fantasma
-    // de tecla "1"). A DIFERENCIA de todos los demás dashes/proyectiles con
-    // barrido (que atraviesan/golpean a TODOS los que tocan), este se
-    // DETIENE en el PRIMER enemigo que encuentra — el jugador queda parado
-    // justo frente a él (no se superponen) — y dispara un cono pequeño +
-    // golpe único hacia ese enemigo (ver getPicaroSkill3Damage): daño base
-    // 50, sube a 60/70 si el enemigo está en 60%/40% de vida o menos, y lo
-    // EJECUTA (mata directo, ignora defensa) si está en 20% o menos. Si
-    // mata, el cooldown se reinicia POR COMPLETO (mismo patrón que la
-    // Flecha Certera del Arquero) Y cura 50% del daño realizado (para una
-    // ejecución, "daño realizado" = la vida que le quedaba al enemigo, ver
-    // Combat.updateRealtime). cooldownMs no se especificó — se usaron 4s
-    // (corto, en línea con el resto del kit rápido del Pícaro).
-    picaro: {
-        name: 'Golpe de Ejecución', emoji: '🗡️', color: '#d0d0e8',
+    // Guerrero — Golpe de Ejecución: dash CORTO (150px, 0.1s, duración fija
+    // — a diferencia del vórtice/flecha, no viaja a "velocidad constante",
+    // es el mismo estilo de dash instantáneo que la Estocada Fantasma del
+    // Pícaro de tecla "1" (de hecho ESTA habilidad vivía en la tecla "3"
+    // del Pícaro hasta que el usuario pidió transplantarla acá — ver
+    // Combat.fireSkill3GuerreroExecute). A DIFERENCIA de todos los demás
+    // dashes/proyectiles con barrido (que atraviesan/golpean a TODOS los
+    // que tocan), este se DETIENE en el PRIMER enemigo que encuentra — el
+    // jugador queda parado justo frente a él (no se superponen) — y
+    // dispara un cono pequeño + golpe único hacia ese enemigo (ver
+    // getGuerreroExecuteDamage): daño base 50, sube a 60/70 si el enemigo
+    // está en 60%/40% de vida o menos, y lo EJECUTA (mata directo, ignora
+    // defensa) si está en 20% o menos. Si mata, el cooldown se reinicia
+    // POR COMPLETO (mismo patrón que la Flecha Certera del Arquero) Y
+    // otorga +2%/kill de daño PERMANENTE (máx 10 stacks/20%, mismo patrón
+    // que las Dagas Orbitales del Pícaro) — REEMPLAZA la curación que
+    // tenía cuando era del Pícaro, a pedido explícito del usuario ("en vez
+    // de dar crítico, da 2% de daño"; la versión Pícaro nunca daba
+    // crítico, pero el pedido es inequívoco sobre el reemplazo del bono
+    // de kill). cooldownMs no se especificó — se usaron 4s. Durante los
+    // 0.1s del dash, el Guerrero es INVULNERABLE — ningún golpe enemigo
+    // conecta (ver Combat.performEnemyAttackRT, chequea this.dash3 directo).
+    // healOnHitPercent/healOnKillPercent: se cura 50% del daño REALIZADO
+    // (post-mitigación, el mismo valor `dealt` que ya se usa para el texto
+    // flotante) con un golpe normal, o 100% si ese golpe mata al enemigo —
+    // en la "ejecución" (mata directo, ignora defensa) el "daño realizado"
+    // para la curación se toma como la vida que tenía el enemigo justo
+    // antes de morir, porque ese camino no pasa por takeDamage/`dealt`.
+    guerrero: {
+        name: 'Golpe de Ejecución', emoji: '⚔️', color: '#ffd700',
         dashRange: 150, dashDurationMs: 100,
         dmgBase: 50, dmgTier60: 60, dmgTier40: 70,
         tier60HpPercent: 0.60, tier40HpPercent: 0.40, executeHpPercent: 0.20,
         coneRange: 70, coneAngle: 35,
-        cooldownMs: 4000, killHealPercent: 0.50,
+        cooldownMs: 4000, dmgStackPerKillPercent: 0.02, dmgStackMaxStacks: 10,
+        healOnHitPercent: 0.50, healOnKillPercent: 1.0,
     },
-    // guerrero/barbaro/tanque: se agregan en próximos pedidos.
+    // Pícaro — Doble Sombra: dash de HASTA 250px (el jugador elige dónde
+    // caer DENTRO de ese rango, según aimDist — mismo criterio que el
+    // Salto Sísmico/Parpadeo Arcano, a diferencia de los demás dashes del
+    // Pícaro que siempre van al máximo) en 0.1s, SIN daño. Deja un CLON en
+    // la posición de INICIO del dash, con la vida actual del Pícaro en ese
+    // momento; si el Pícaro tenía la Dagas Orbitales (tecla "2") activa,
+    // el clon TAMBIÉN la tiene y tickea su propio pulso de daño (mismas
+    // fórmulas que el Pícaro real, ver Combat.tickPicaroCloneToggleSkill),
+    // sin límite de tiempo propio. El Pícaro queda invisible
+    // invisibleDurationMs (3s): mientras dure, los enemigos NUNCA lo
+    // atacan (ver Combat.performEnemyAttackRT) — y si hay un clon vivo, la
+    // IA de los enemigos directamente lo persigue/ataca A ÉL en vez del
+    // jugador real (ver aiTarget en updateRealtime), lo que de paso logra
+    // "atacar sin ser visto" sin necesitar rediseñar la IA de cero. El
+    // clon NO tiene bloqueo/esquiva/escudo (recibe el golpe de lleno,
+    // ni turnos de expiración propios) y persiste hasta que: (a) su vida
+    // llega a 0 por los enemigos, o (b) el Pícaro lo atraviesa con su
+    // propio dash de tecla "1" (Estocada Fantasma) — en AMBOS casos
+    // explota: círculos expansivos + cloneExplosionDamage a todo enemigo
+    // en cloneExplosionRadius. Cada enemigo que MATA la explosión suma
+    // +2%/kill de crítico PERMANENTE (máx 10 stacks/20%, ver
+    // Combat.getPicaroExplosionCritBonusPercent) y reduce el cooldown 1s
+    // (máx 5 kills = 5s = reinicio completo, ver cdReductionMaxKills).
+    picaro: {
+        name: 'Doble Sombra', emoji: '🥷', color: '#d0d0e8',
+        dashRange: 250, dashDurationMs: 100, invisibleDurationMs: 3000,
+        cloneExplosionRadius: 200, cloneExplosionDamage: 60,
+        explosionCritPerKillPercent: 0.02, explosionCritMaxStacks: 10,
+        cooldownMs: 5000, cdReductionPerKillMs: 1000, cdReductionMaxKills: 5,
+    },
+    // Tanque — Círculo del Gigante: círculo de radio 200 que SIGUE al
+    // jugador (a diferencia de Bastión, tecla "1", que queda fijo en el
+    // punto de lanzamiento) — se interpretó así porque el pedido dice
+    // "alrededor del jugador" y el arrastre es "hacia el jugador", lo que
+    // sólo tiene sentido como un marco de referencia que se mueve con él.
+    // Todo enemigo dentro del radio es arrastrado hacia el Tanque cada
+    // frame (pullSpeedPxPerSec no especificado — se usó un valor algo
+    // mayor a la velocidad típica de un enemigo para que el tirón se
+    // sienta; respeta paredes). Mientras está activa: -30% de daño
+    // recibido (reducción DIRECTA sobre el daño final, reutiliza el mismo
+    // campo que el damageReducePercent de encantamientos, ver
+    // Player.takeDamage — NO es un bono de mitigación de armadura) y cada
+    // enemigo que golpea al Tanque recibe el 100% de su propio daño BASE
+    // como reflejo ("el daño base del ataque", antes de bloqueo/reducción
+    // — no lo que el Tanque terminó recibiendo). Por cada enemigo que
+    // MUERE mientras la habilidad está activa (sin importar la causa:
+    // reflejo, ataques normales, etc., ver Combat.onEnemyDefeated) cura
+    // 10% de la vida máxima y suma 1 stack de "Gigante" (máx 10). Los
+    // stacks se reinician a 0 en cada lanzamiento y sólo tienen efecto
+    // MIENTRAS la habilidad está activa (se leen como parte "de la
+    // habilidad", no como progreso permanente — a diferencia de los
+    // stacks de crítico del Pícaro, que sí son indefinidos). Cada stack
+    // da +10% de vida máxima (multiplicador sobre Player.recalcMaxHp, NO
+    // cura de más — sólo el 10%-por-kill explícito cura) y +3% de
+    // resistencias (mismo mecanismo que defPctPerStack del Círculo de
+    // Escudos: multiplicador sobre armor.defense). Tope 10 stacks =
+    // +100% vida máxima / +30% resistencias extra.
+    tanque: {
+        name: 'Círculo del Gigante', emoji: '🗿', color: '#c0392b',
+        radius: 200, pullSpeedPxPerSec: 220,
+        damageReducePercent: 0.30, reflectPercent: 1.0,
+        killHealPercent: 0.10,
+        giantHpPerStackPercent: 0.10, giantDefPerStackPercent: 0.03, giantMaxStacks: 10,
+        durationMs: 8000, cooldownMs: 4000,
+    },
+    // Bárbaro — Torbellino de Espadas: 2 espadas de bladeLength px, una a
+    // cada lado del jugador (relativas al mundo, no al mouse — el pedido no
+    // menciona apuntar, mismo criterio "sin aim" que el Círculo del Gigante
+    // del Tanque), con el mango pegado al jugador y la punta hacia afuera.
+    // Cada una gira 360° en sentido horario en durationMs (0.3s) — como
+    // arrancan opuestas (180°) y ambas completan la vuelta completa e
+    // independiente, entre las dos barren TODO el círculo alrededor del
+    // jugador (cada ángulo pasa por una espada a la mitad de la animación y
+    // por la otra en el otro extremo) — el hitSet es lo que garantiza que
+    // cada enemigo sólo reciba UN golpe por lanzamiento, sin importar cuál
+    // de las dos espadas llegue primero a su ángulo (ver
+    // Combat.applyBarbaroSpinHits/hitSet). dmgPerHit (50) es un valor
+    // FIJO de la habilidad (no escala con el arma/tier, mismo criterio que
+    // el resto de daños de tecla "3" de esta tabla), multiplicado por la
+    // cadena universal de bonos de daño. La curación NO es el robo de vida
+    // normal del Bárbaro: es una fórmula propia de esta habilidad, usa el
+    // robo de vida TOTAL actual (encantamiento + Furia Sangrienta + stacks
+    // de Hachas Orbitales, ver Combat.getBarbaroCurrentLifestealPercent)
+    // multiplicado por 2 (lifestealMultiplier), aplicada sobre el daño de
+    // ESTA habilidad (antes de la mitigación del enemigo, igual que el
+    // resto de curaciones por robo de vida ya existentes en el juego). Por
+    // cada enemigo asesinado por esta habilidad se reduce el cooldown
+    // cdReductionPerKillMs, hasta cdReductionMaxMs (5s) de reducción total
+    // por lanzamiento — igual mecanismo que Doble Sombra del Pícaro.
+    barbaro: {
+        name: 'Torbellino de Espadas', emoji: '🗡️', color: '#8b0000',
+        bladeLength: 75, durationMs: 300, dmgPerHit: 50, lifestealMultiplier: 2,
+        cooldownMs: 6000, cdReductionPerKillMs: 500, cdReductionMaxMs: 5000,
+    },
 };
 
 // Daño de la Flecha Certera del Arquero según cuántos píxeles ya voló al
@@ -986,12 +1283,12 @@ function getArqueroArrowDamage(pixelsTraveled) {
     return cfg.dmgTier2 + cfg.dmgScalePerPixelBeyond200 * (pixelsTraveled - cfg.dmgTier2MaxDist);
 }
 
-// Daño del Golpe de Ejecución del Pícaro según el % de vida ACTUAL del
-// enemigo golpeado (ver RT_SKILL3_ABILITIES.picaro). Devuelve `null` para
-// "ejecución" (mata directo, ver Combat.fireSkill3PicaroDash/updateRealtime
-// — no es un valor de daño real, ignora defensa).
-function getPicaroSkill3Damage(enemyHpPercent) {
-    const cfg = RT_SKILL3_ABILITIES.picaro;
+// Daño del Golpe de Ejecución del Guerrero según el % de vida ACTUAL del
+// enemigo golpeado (ver RT_SKILL3_ABILITIES.guerrero). Devuelve `null` para
+// "ejecución" (mata directo, ver Combat.fireSkill3GuerreroExecute/
+// updateRealtime — no es un valor de daño real, ignora defensa).
+function getGuerreroExecuteDamage(enemyHpPercent) {
+    const cfg = RT_SKILL3_ABILITIES.guerrero;
     if (enemyHpPercent <= cfg.executeHpPercent) return null;
     if (enemyHpPercent <= cfg.tier40HpPercent) return cfg.dmgTier40;
     if (enemyHpPercent <= cfg.tier60HpPercent) return cfg.dmgTier60;
@@ -1053,7 +1350,12 @@ const RT_ATTACK_GEOMETRY = {
         { hitShape: 'circle', visual: 'circle', range: 350, startRange: 80, duration: 550, color: '#4169e1' },
     ],
     mago: [ // 🧙 Azul claro neon
-        { hitShape: 'cone', visual: 'cone', range: 250, angle: 60, duration: 350, color: '#00ffff' },
+        // Ataque básico (slot 0, primer golpe): +30% de rango (250 -> 325) a
+        // cambio de un cono más angosto — no se especificó el ángulo final,
+        // se reutilizó el mismo valor (40°) que ya usa el SEGUNDO ataque
+        // básico de Mago (slot 1, línea de abajo), para no inventar un
+        // número nuevo sin referencia en el propio juego.
+        { hitShape: 'cone', visual: 'cone', range: 325, angle: 40, duration: 350, color: '#00ffff' },
         { hitShape: 'cone', visual: 'cone', range: 300, angle: 40, duration: 260, color: '#00ffff' },
         { hitShape: 'circle', visual: 'circle', range: 360, startRange: 60, duration: 600, color: '#00ffff' },
     ],

@@ -102,7 +102,7 @@ const UI = {
         this.els.hpText.textContent = `${Math.round(player.hp)}/${player.maxHp}`;
 
         if (prof.type === 'passive') {
-            this.els.weapon.textContent = `🛡️ ${getWeaponName('armadura', player.getArmorInfo().tier.id)}`;
+            this.els.weapon.textContent = `🛡️ Defensa ${Math.round(player.getArmorInfo().defense)}`;
         } else if (prof.baseDamage > 0 || prof.type === 'combat_block') {
             const w = player.getCurrentWeapon();
             this.els.weapon.textContent = `${w.emoji} ${w.name} (⚔ ${player.getDamage()})`;
@@ -314,21 +314,40 @@ const UI = {
         `;
         equippedSection.appendChild(weaponDiv);
 
+        // Armadura: 3 casilleros independientes (ver ARMOR_SLOTS), cada uno
+        // con su propia pieza (o vacío). Si NINGUNO tiene nada equipado se
+        // muestra el respaldo "automático" (mismo criterio que antes de
+        // este cambio, ver Player.getArmorInfo).
         const armorInfo = player.getArmorInfo();
-        const craftedArmor = player.getEquippedCraftedItem('armadura');
-        const armorTier = craftedArmor ? TIERS.find(t => t.id === craftedArmor.tierId) : getTierForLevel(player.level);
-        const armorRarity = craftedArmor ? getMonsterRarity(craftedArmor.rarityId) : null;
-        const armorDiv = document.createElement('div');
-        armorDiv.className = 'inv-item active';
-        armorDiv.innerHTML = `
-            <div class="item-emoji">🛡️</div>
-            <div class="item-info">
-                <div class="item-name"${armorRarity ? ` style="color:${armorRarity.color}"` : ''}>${getWeaponName('armadura', armorTier.id)} · Tier ${armorTier.id}${armorRarity ? ` · ${getRarityEmoji(armorRarity.id)}` : ''}</div>
-                <div class="item-sub">🛡️ ARMADURA · Nivel ${player.level} · DEF ${armorInfo.defense}${craftedArmor ? ' · Crafteado' : ''}</div>
-            </div>
-            <span class="passive-tag">Armadura equipada</span>
-        `;
-        equippedSection.appendChild(armorDiv);
+        const anyArmorEquipped = armorInfo.pieces.some(p => p);
+        ARMOR_SLOTS.forEach((slotDef, i) => {
+            const piece = armorInfo.pieces[i];
+            const armorDiv = document.createElement('div');
+            armorDiv.className = 'inv-item' + (piece ? ' active' : '');
+            if (piece) {
+                const variant = ARMOR_PIECE_VARIANTS[piece.subtype];
+                const tier = TIERS.find(t => t.id === piece.tierId);
+                const rarity = getMonsterRarity(piece.rarityId);
+                armorDiv.innerHTML = `
+                    <div class="item-emoji">${slotDef.emoji}</div>
+                    <div class="item-info">
+                        <div class="item-name" style="color:${rarity.color}">${slotDef.name} ${variant.name} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}</div>
+                        <div class="item-sub">DEF ${piece.defense}${piece.dmgBonusPercent ? ` · +${Math.round(piece.dmgBonusPercent * 100)}% daño` : ''}${piece.hpBonusPercent ? ` · +${Math.round(piece.hpBonusPercent * 100)}% vida` : ''}</div>
+                    </div>
+                    <button class="equip-btn" data-unequip-armor-slot="${slotDef.id}">Quitar</button>
+                `;
+            } else {
+                armorDiv.innerHTML = `
+                    <div class="item-emoji">${slotDef.emoji}</div>
+                    <div class="item-info">
+                        <div class="item-name">${slotDef.name} (vacío)</div>
+                        <div class="item-sub">${anyArmorEquipped ? 'Sin pieza en este casillero' : `Respaldo automático · DEF total ${Math.round(armorInfo.defense)}`}</div>
+                    </div>
+                    <span class="passive-tag">Vacío</span>
+                `;
+            }
+            equippedSection.appendChild(armorDiv);
+        });
         list.appendChild(equippedSection);
 
         // Los buffs activos de alimentos ya NO se muestran acá — ver la
@@ -409,15 +428,14 @@ const UI = {
         itemsTitle.textContent = 'Armas y armaduras';
         bagSection.appendChild(itemsTitle);
 
-        // Fila de un objeto crafteado (arma o armadura), reutilizada para
-        // cada profesión más abajo — así quedan mezclados con el resto del
-        // inventario en vez de una sección aparte.
+        // Fila de un arma crafteada, reutilizada para cada profesión más
+        // abajo — así quedan mezcladas con el resto del inventario en vez
+        // de una sección aparte.
         const appendCraftedRow = (item) => {
             const itemProf = getProfession(item.profId);
             const tier = TIERS.find(t => t.id === item.tierId);
             const rarity = getMonsterRarity(item.rarityId);
             const isEquipped = player.equippedCraftedByProf[item.profId] === item.id;
-            const statLabel = item.kind === 'armor' ? `DEF ${item.defense}` : `⚔ ${item.damage}`;
 
             const div = document.createElement('div');
             div.className = 'inv-item' + (isEquipped ? ' active' : '');
@@ -425,7 +443,7 @@ const UI = {
                 <div class="item-emoji">${itemProf.emoji}</div>
                 <div class="item-info">
                     <div class="item-name" style="color:${rarity.color}">${getWeaponName(item.profId, item.tierId)} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}</div>
-                    <div class="item-sub">${itemProf.emoji} ${itemProf.name} · Tier ${tier.id} ${tier.name} · ${statLabel}${isEquipped ? ' · Equipado' : ''}</div>
+                    <div class="item-sub">${itemProf.emoji} ${itemProf.name} · Tier ${tier.id} ${tier.name} · ⚔ ${item.damage}${isEquipped ? ' · Equipado' : ''}</div>
                 </div>
                 ${isEquipped
                     ? `<button class="equip-btn" data-unequip-craft="${item.profId}">Quitar</button>`
@@ -434,11 +452,43 @@ const UI = {
             bagSection.appendChild(div);
         };
 
-        // Objetos crafteados de la armadura (no tiene fila "automática" acá,
-        // esa ya se ve arriba en Equipado). getProfession() puede devolver
-        // undefined para profId huérfanos de clases eliminadas/renombradas
-        // en partidas guardadas antes de un rebalanceo (ver constants.js).
-        player.craftedItems.filter(it => it.profId === 'armadura' && getProfession(it.profId)).forEach(appendCraftedRow);
+        // Fila de una pieza de armadura crafteada (casco/pechera/botas) —
+        // el botón de equipar se deshabilita si el nivel del jugador no
+        // alcanza el requisito de esa pieza (ver getArmorEquipMinLevel).
+        const appendArmorRow = (item) => {
+            const slotDef = ARMOR_SLOTS.find(s => s.id === item.slot);
+            const variant = ARMOR_PIECE_VARIANTS[item.subtype];
+            const tier = TIERS.find(t => t.id === item.tierId);
+            const rarity = getMonsterRarity(item.rarityId);
+            const isEquipped = player.equippedArmorBySlot[item.slot] === item.id;
+            const minLevel = getArmorEquipMinLevel(item.tierId, item.rarityId);
+            const canEquip = player.level >= minLevel;
+            const statParts = [`DEF ${item.defense}`];
+            if (item.dmgBonusPercent) statParts.push(`+${Math.round(item.dmgBonusPercent * 100)}% daño`);
+            if (item.hpBonusPercent) statParts.push(`+${Math.round(item.hpBonusPercent * 100)}% vida`);
+
+            const div = document.createElement('div');
+            div.className = 'inv-item' + (isEquipped ? ' active' : '');
+            let actionHTML;
+            if (isEquipped) {
+                actionHTML = `<button class="equip-btn" data-unequip-armor-slot="${item.slot}">Quitar</button>`;
+            } else if (canEquip) {
+                actionHTML = `<button class="equip-btn" data-equip-armor="${item.id}">Equipar</button>`;
+            } else {
+                actionHTML = `<span class="passive-tag">Requiere nivel ${minLevel}</span>`;
+            }
+            div.innerHTML = `
+                <div class="item-emoji">${slotDef.emoji}</div>
+                <div class="item-info">
+                    <div class="item-name" style="color:${rarity.color}">${slotDef.name} ${variant.name} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}</div>
+                    <div class="item-sub">${slotDef.emoji} ${slotDef.name} · Tier ${tier.id} ${tier.name} · ${statParts.join(' · ')}${isEquipped ? ' · Equipado' : ''}</div>
+                </div>
+                ${actionHTML}
+            `;
+            bagSection.appendChild(div);
+        };
+
+        player.craftedItems.filter(it => it.kind === 'armor').forEach(appendArmorRow);
 
         // Objetos crafteados de la profesión activa (alternativas al arma
         // que ya se ve arriba en Equipado).
@@ -482,6 +532,20 @@ const UI = {
         list.querySelectorAll('[data-unequip-craft]').forEach(btn => {
             btn.addEventListener('click', () => {
                 player.unequipCrafted(btn.dataset.unequipCraft);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        list.querySelectorAll('[data-equip-armor]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                player.equipArmorPiece(btn.dataset.equipArmor);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        list.querySelectorAll('[data-unequip-armor-slot]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                player.unequipArmorSlot(btn.dataset.unequipArmorSlot);
                 this.renderInventory(player);
                 this.updateHUD(player);
             });
@@ -667,10 +731,11 @@ const UI = {
 
         const combatGroup = document.createElement('div');
         combatGroup.className = 'craft-prof-group';
-        ['picaro', 'guerrero', 'barbaro', 'mago', 'arquero', 'tanque', 'armadura'].forEach(id => {
+        ['picaro', 'guerrero', 'barbaro', 'mago', 'arquero', 'tanque'].forEach(id => {
             const prof = getProfession(id);
             if (prof) combatGroup.appendChild(makeBtn(prof.id, `${prof.emoji} ${prof.name}`));
         });
+        combatGroup.appendChild(makeBtn('__armor__', '🛡️ ARMADURA'));
         combatGroup.appendChild(makeBtn('__mount__', '🐴 MONTURAS'));
         selectorEl.appendChild(combatGroup);
 
@@ -705,21 +770,27 @@ const UI = {
             this.renderNucleoCraft(player, listEl);
             return;
         }
+        if (this._craftProf === '__armor__') {
+            this.renderArmorCraft(player, listEl);
+            return;
+        }
 
         const isPotion = this._craftProf === '__potion__';
         const prof = isPotion ? null : getProfession(this._craftProf);
-        const isArmor = !isPotion && prof.id === 'armadura';
         const isTool = !isPotion && prof.type === 'gather';
+        const isCombatWeapon = !isPotion && !!WEAPON_PIECE_TYPES[this._craftProf];
 
         const tierSource = isPotion ? HERB_TIERS : TIERS;
         tierSource.forEach(tier => {
-            // Pociones: solo hierba. Armadura: solo mena. Armas/herramientas:
-            // mitad del costo en madera, mitad en mena del tier (ver punto 9).
+            // Pociones: solo hierba. Armas de combate: costo FIJO (25
+            // mena + 25 madera + 5 piezas, ver WEAPON_CRAFT_*). Herramientas:
+            // costo escalado por tier, mitad madera/mitad mena (ver punto 9).
             const oreId = isPotion ? null : `mat_tier_${tier.id}`;
             const woodId = `madera_tier_${tier.id}`;
-            const totalCost = isPotion ? POTION_HERB_COST : getCraftMaterialCost(tier.id);
-            const woodCost = (!isPotion && !isArmor) ? Math.round(totalCost / 2) : 0;
-            const oreCost = totalCost - woodCost;
+            let woodCost, oreCost;
+            if (isPotion) { woodCost = 0; oreCost = 0; }
+            else if (isCombatWeapon) { woodCost = WEAPON_CRAFT_WOOD_COST; oreCost = WEAPON_CRAFT_ORE_COST; }
+            else { const totalCost = getCraftMaterialCost(tier.id); woodCost = Math.round(totalCost / 2); oreCost = totalCost - woodCost; }
             const matId = isPotion ? `hierba_tier_${tier.id}` : oreId;
             const haveMat = player.materials[matId] || 0;
             const haveWood = player.materials[woodId] || 0;
@@ -740,11 +811,15 @@ const UI = {
             const raritySelect = document.createElement('select');
             raritySelect.className = 'craft-rarity-select';
             MONSTER_RARITIES.forEach(rarity => {
-                const coreId = getNucleoId(rarity.id, tier.id);
-                const haveCore = player.materials[coreId] || 0;
                 const opt = document.createElement('option');
                 opt.value = rarity.id;
-                opt.textContent = `${rarity.name} (núcleos T${tier.id}: ${haveCore})`;
+                if (isCombatWeapon) {
+                    const havePiece = player.materials[getWeaponPieceId(this._craftProf, rarity.id, tier.id)] || 0;
+                    opt.textContent = `${rarity.name} (piezas: ${havePiece})`;
+                } else {
+                    const haveCore = player.materials[getNucleoId(rarity.id, tier.id)] || 0;
+                    opt.textContent = `${rarity.name} (núcleos T${tier.id}: ${haveCore})`;
+                }
                 raritySelect.appendChild(opt);
             });
             row.appendChild(raritySelect);
@@ -760,17 +835,25 @@ const UI = {
             const updatePreview = () => {
                 const rarityId = raritySelect.value;
                 const rarity = getMonsterRarity(rarityId);
-                const coreId = getNucleoId(rarityId, tier.id);
-                const haveCore = player.materials[coreId] || 0;
                 let statPreview;
                 if (isPotion) statPreview = `❤️ +${getPotionHealAmount(rarityId)}`;
-                else if (isArmor) statPreview = `DEF ${Math.round(tier.id * 4 * rarity.mult)}`;
                 else if (isTool) statPreview = `📦 ${GATHER_YIELD_MIN}-${getGatherYieldMax(rarityId)}`;
                 else statPreview = `⚔ ${Math.round(prof.baseDamage * tier.mult * rarity.mult * 10) / 10}`;
                 preview.innerHTML = `<span style="color:${rarity.color}">${statPreview}</span>`;
-                const affordable = haveMat >= oreCost && haveWood >= woodCost && haveCore >= CRAFT_CORE_COST;
-                const missingLabel = haveMat < oreCost ? `Falta ${matInfo.name}`
-                    : (haveWood < woodCost ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`);
+
+                let affordable, missingLabel;
+                if (isCombatWeapon) {
+                    const pieceId = getWeaponPieceId(this._craftProf, rarityId, tier.id);
+                    const havePiece = player.materials[pieceId] || 0;
+                    affordable = haveMat >= oreCost && haveWood >= woodCost && havePiece >= WEAPON_CRAFT_PIECE_COST;
+                    missingLabel = haveMat < oreCost ? `Falta ${matInfo.name}`
+                        : (haveWood < woodCost ? `Falta ${woodInfo.name}` : `Faltan piezas ${rarity.name}`);
+                } else {
+                    const haveCore = player.materials[getNucleoId(rarityId, tier.id)] || 0;
+                    affordable = haveMat >= oreCost && haveWood >= woodCost && haveCore >= CRAFT_CORE_COST;
+                    missingLabel = haveMat < oreCost ? `Falta ${matInfo.name}`
+                        : (haveWood < woodCost ? `Falta ${woodInfo.name}` : `Falta núcleo ${rarity.name}`);
+                }
                 this._gateCraftBtn(craftBtn, affordable, missingLabel);
             };
             raritySelect.addEventListener('change', updatePreview);
@@ -994,6 +1077,110 @@ const UI = {
                 player.unequipMount();
                 this.renderCraft(player);
             });
+        });
+    },
+
+    // Modo "🛡️ ARMADURA" del panel de crafteo: primero se elige la
+    // VARIANTE (ligera/media/pesada, ver ARMOR_PIECE_VARIANTS), luego cada
+    // Tier es una fila con selector de casillero (casco/pechera/botas) +
+    // selector de rareza — costo FIJO (30 material + 5 piezas crudas de esa
+    // misma variante/rareza/tier, ver ARMOR_CRAFT_ORE_COST/ARMOR_CRAFT_PIECE_COST).
+    renderArmorCraft(player, listEl) {
+        if (!this._craftArmorSubtype) this._craftArmorSubtype = 'ligera';
+
+        const subtypeSelEl = document.createElement('div');
+        subtypeSelEl.className = 'craft-prof-selector food-tier-selector';
+        Object.keys(ARMOR_PIECE_VARIANTS).forEach(subtype => {
+            const variant = ARMOR_PIECE_VARIANTS[subtype];
+            const btn = document.createElement('button');
+            btn.className = 'craft-prof-btn' + (this._craftArmorSubtype === subtype ? ' active' : '');
+            btn.innerHTML = `${variant.emoji} ${variant.name.toUpperCase()}`;
+            btn.addEventListener('click', () => {
+                this._craftArmorSubtype = subtype;
+                this.renderCraft(player);
+            });
+            subtypeSelEl.appendChild(btn);
+        });
+        listEl.appendChild(subtypeSelEl);
+
+        const subtype = this._craftArmorSubtype;
+        const variant = ARMOR_PIECE_VARIANTS[subtype];
+
+        TIERS.forEach(tier => {
+            const oreId = `mat_tier_${tier.id}`;
+            const haveOre = player.materials[oreId] || 0;
+            const oreInfo = getMaterialInfo(oreId);
+
+            const row = document.createElement('div');
+            row.className = 'craft-row';
+
+            const info = document.createElement('div');
+            info.className = 'craft-row-info';
+            row.appendChild(info);
+
+            const slotSelect = document.createElement('select');
+            slotSelect.className = 'craft-rarity-select';
+            ARMOR_SLOTS.forEach(s => {
+                const opt = document.createElement('option');
+                opt.value = s.id;
+                opt.textContent = `${s.emoji} ${s.name}`;
+                slotSelect.appendChild(opt);
+            });
+            row.appendChild(slotSelect);
+
+            const raritySelect = document.createElement('select');
+            raritySelect.className = 'craft-rarity-select';
+            MONSTER_RARITIES.forEach(rarity => {
+                const pieceId = getArmorPieceId(subtype, rarity.id, tier.id);
+                const havePiece = player.materials[pieceId] || 0;
+                const opt = document.createElement('option');
+                opt.value = rarity.id;
+                opt.textContent = `${rarity.name} (piezas: ${havePiece})`;
+                raritySelect.appendChild(opt);
+            });
+            row.appendChild(raritySelect);
+
+            const preview = document.createElement('div');
+            preview.className = 'craft-preview';
+            row.appendChild(preview);
+
+            const craftBtn = document.createElement('button');
+            craftBtn.className = 'apply-btn craft-btn';
+            row.appendChild(craftBtn);
+
+            const updatePreview = () => {
+                const rarityId = raritySelect.value;
+                const rarity = getMonsterRarity(rarityId);
+                const stats = getArmorPieceStats(subtype, rarityId);
+                const pieceId = getArmorPieceId(subtype, rarityId, tier.id);
+                const havePiece = player.materials[pieceId] || 0;
+                const minLevel = getArmorEquipMinLevel(tier.id, rarityId);
+                const statParts = [`DEF ${stats.defense}`];
+                if (stats.dmgBonusPercent) statParts.push(`+${Math.round(stats.dmgBonusPercent * 100)}% daño`);
+                if (stats.hpBonusPercent) statParts.push(`+${Math.round(stats.hpBonusPercent * 100)}% vida`);
+                preview.innerHTML = `<span style="color:${rarity.color}">${statParts.join(' · ')} · Nivel req. ${minLevel}</span>`;
+                info.innerHTML = `
+                    <div class="item-name">${tier.emoji} ${tier.name} · ${variant.emoji} ${variant.name}</div>
+                    <div class="item-sub">${oreInfo.emoji} ${oreInfo.name}: ${haveOre}/${ARMOR_CRAFT_ORE_COST} · Piezas: ${havePiece}/${ARMOR_CRAFT_PIECE_COST}</div>
+                `;
+                const affordable = haveOre >= ARMOR_CRAFT_ORE_COST && havePiece >= ARMOR_CRAFT_PIECE_COST;
+                const missingLabel = haveOre < ARMOR_CRAFT_ORE_COST ? `Falta ${oreInfo.name}` : `Faltan piezas ${rarity.name}`;
+                this._gateCraftBtn(craftBtn, affordable, missingLabel);
+            };
+            raritySelect.addEventListener('change', updatePreview);
+            updatePreview();
+
+            craftBtn.addEventListener('click', () => {
+                const item = player.craftArmorPiece(slotSelect.value, subtype, tier.id, raritySelect.value);
+                if (!item) return;
+                const slotDef = ARMOR_SLOTS.find(s => s.id === item.slot);
+                this.showLevelToastText(`🛠️ Crafteado: ${slotDef.name} ${variant.name} (${getMonsterRarity(item.rarityId).name})`);
+                this.renderCraft(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+
+            listEl.appendChild(row);
         });
     },
 
@@ -1363,6 +1550,43 @@ const UI = {
             const remaining = Math.max(0, Combat.skill3.arrowKillDmgBuffUntil - Date.now());
             lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(skill3DmgBuff * 100)}% daño (${(remaining / 1000).toFixed(1)}s)` });
         }
+        // Guerrero: +2%/kill de daño PERMANENTE con el Golpe de Ejecución
+        // (tecla "3", máx 10 stacks/20% — reemplazó la curación que tenía
+        // como habilidad del Pícaro).
+        const guerreroExecuteDmg = Combat.getSkill3GuerreroDmgBonusPercent(profId);
+        if (guerreroExecuteDmg > 0) {
+            const cfg = RT_SKILL3_ABILITIES.guerrero;
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(guerreroExecuteDmg * 100)}% daño (Golpe de Ejecución, ${Combat.skill3.guerreroExecuteDmgStacks}/${cfg.dmgStackMaxStacks})` });
+        }
+        // Pícaro: +2%/kill de crítico PERMANENTE con la explosión del clon
+        // de Doble Sombra (tecla "3", máx 10 stacks/20%).
+        const picaroExplosionCrit = Combat.getPicaroExplosionCritBonusPercent(profId);
+        if (picaroExplosionCrit > 0) {
+            const cfg = RT_SKILL3_ABILITIES.picaro;
+            lines.push({ color: cfg.color, text: `${cfg.emoji} +${Math.round(picaroExplosionCrit * 100)}% crítico (Doble Sombra, ${Combat.skill3.picaroExplosionCritStacks}/${cfg.explosionCritMaxStacks})` });
+        }
+        // Tanque: Círculo del Gigante activo (tecla "3") — muestra el
+        // tiempo restante, la reducción de daño fija, el reflejo, y los
+        // bonos actuales de "Gigante" (vida máxima/resistencias) según los
+        // stacks acumulados en ESTE lanzamiento (se resetean al terminar).
+        if (Combat.skill3.tanqueActive && profId === 'tanque') {
+            const cfg = RT_SKILL3_ABILITIES.tanque;
+            const remaining = Math.max(0, Combat.skill3.tanqueActiveUntil - Date.now());
+            const parts = [`-${Math.round(cfg.damageReducePercent * 100)}% daño recibido`, `reflejo ${Math.round(cfg.reflectPercent * 100)}%`];
+            if (Combat.skill3.tanqueGiantStacks > 0) {
+                const hpBonus = Combat.getTanqueGiantMaxHpBonusPercent(profId);
+                const defBonus = Combat.getTanqueGiantDefenseBonusPercent(profId);
+                parts.push(`Gigante +${Math.round(hpBonus * 100)}% vida / +${Math.round(defBonus * 100)}% resist. (${Combat.skill3.tanqueGiantStacks}/${cfg.giantMaxStacks})`);
+            }
+            lines.push({ color: cfg.color, text: `${cfg.emoji} ${parts.join(', ')} (${(remaining / 1000).toFixed(1)}s)` });
+        }
+        // Invisibilidad de Doble Sombra: no es un bono numérico, pero se
+        // muestra igual como confirmación de que sigue activa.
+        if (player.invisibleUntil && Date.now() < player.invisibleUntil) {
+            const cfg = RT_SKILL3_ABILITIES.picaro;
+            const remaining = Math.max(0, player.invisibleUntil - Date.now());
+            lines.push({ color: cfg.color, text: `👻 Invisible (${(remaining / 1000).toFixed(1)}s)` });
+        }
 
         if (player.shield && player.shield.amount > 0) {
             lines.push({ color: '#8ec0ff', text: `🛡️ Escudo +${Math.round(player.shield.amount)} HP` });
@@ -1427,13 +1651,25 @@ const UI = {
         const item = entry.item;
         const rarity = getMonsterRarity(item.rarityId);
         const tier = TIERS.find(t => t.id === item.tierId);
-        if (entry.type === 'weapon' || entry.type === 'armor') {
+        if (entry.type === 'armor') {
+            const slotDef = ARMOR_SLOTS.find(s => s.id === item.slot);
+            const variant = ARMOR_PIECE_VARIANTS[item.subtype];
+            const statParts = [`DEF ${item.defense}`];
+            if (item.dmgBonusPercent) statParts.push(`+${Math.round(item.dmgBonusPercent * 100)}% daño`);
+            if (item.hpBonusPercent) statParts.push(`+${Math.round(item.hpBonusPercent * 100)}% vida`);
+            return {
+                name: `${slotDef ? slotDef.name : 'Armadura'} ${variant ? variant.name : ''} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}`,
+                emoji: slotDef ? slotDef.emoji : '🛡️',
+                sub: `${statParts.join(' · ')} · ${rarity.name}`,
+                color: rarity.color,
+            };
+        }
+        if (entry.type === 'weapon') {
             const prof = getProfession(item.profId);
-            const statLabel = item.kind === 'armor' ? `DEF ${item.defense}` : `⚔ ${item.damage}`;
             return {
                 name: `${getWeaponName(item.profId, item.tierId)} · Tier ${tier.id} · ${getRarityEmoji(rarity.id)}`,
                 emoji: prof ? prof.emoji : '❔',
-                sub: `${statLabel} · ${rarity.name}`,
+                sub: `⚔ ${item.damage} · ${rarity.name}`,
                 color: rarity.color,
             };
         }

@@ -51,6 +51,21 @@ function distancePointToSegment(px, py, x1, y1, x2, y2) {
     return Math.hypot(px - p.x, py - p.y);
 }
 
+// ¿El ángulo `targetAngle` quedó DENTRO del arco barrido de `fromAngle` a
+// `toAngle` (SIEMPRE creciente/horario, en radianes, sin normalizar)? Usado
+// por el Torbellino de Espadas del Bárbaro para detectar qué enemigos tocó
+// cada espada este frame — mismo espíritu que closestPointOnSegment: barre
+// el segmento angular ENTRE frames (no solo el ángulo puntual actual) para
+// no saltearse enemigos con un dt grande.
+function isAngleInSweep(targetAngle, fromAngle, toAngle) {
+    const sweep = toAngle - fromAngle;
+    if (sweep <= 0) return false;
+    if (sweep >= Math.PI * 2) return true;
+    const twoPi = Math.PI * 2;
+    const rel = ((targetAngle - fromAngle) % twoPi + twoPi) % twoPi;
+    return rel <= sweep;
+}
+
 const Combat = {
     player: null,
     enemies: [], // referencia viva al array de enemigos del piso actual (se refresca cada updateRealtime)
@@ -90,12 +105,20 @@ const Combat = {
     // skill1.aiming). `skill3CooldownUntil` es único, mismo patrón que
     // skill1CooldownUntil. `arrowKillDmgBuffUntil`: +10% de daño temporal
     // del Arquero tras matar con la Flecha Certera (ver
-    // getSkill3DamageBuffPercent).
-    skill3: { aiming: false, arrowKillDmgBuffUntil: 0 },
+    // getSkill3DamageBuffPercent). `guerreroExecuteDmgStacks`: +2%/kill de
+    // daño permanente del Golpe de Ejecución (máx 10). `picaroExplosionCritStacks`:
+    // +2%/kill de crítico permanente de la explosión de Doble Sombra (máx 10).
+    // `tanqueActive`/`tanqueActiveUntil`: Círculo del Gigante activo (8s).
+    // `tanqueGiantStacks` (0-10): a diferencia de los stacks del Pícaro, se
+    // RESETEAN a 0 en cada lanzamiento y sólo valen mientras la habilidad
+    // esté activa (ver RT_SKILL3_ABILITIES.tanque).
+    skill3: { aiming: false, arrowKillDmgBuffUntil: 0, guerreroExecuteDmgStacks: 0, picaroExplosionCritStacks: 0, tanqueActive: false, tanqueActiveUntil: 0, tanqueGiantStacks: 0 },
     skill3CooldownUntil: 0,
     vortex: null, // Mago: { profId, cfg, x, y, startX/Y, endX/Y, startAt, travelDurationMs, currentRadius, finalRadius, phase: 'traveling'|'static', hitSet, staticUntil, lastStaticTickAt, tierMult, rarityMult, rotationStartAt }
     arrow3: null, // Arquero: { profId, cfg, x, y, startX/Y, endX/Y, dirX, dirY, startAt, travelDurationMs, tierMult, rarityMult }
-    dash3: null,  // Pícaro: { profId, cfg, x, y, startX/Y, endX/Y, dirX, dirY, startAt, travelDurationMs, tierMult, rarityMult } — se detiene en el primer enemigo tocado (ver updateRealtime)
+    dash3: null,  // Guerrero (Golpe de Ejecución, transplantado del Pícaro): { profId, cfg, x, y, startX/Y, endX/Y, dirX, dirY, startAt, travelDurationMs, tierMult, rarityMult } — se detiene en el primer enemigo tocado (ver updateRealtime)
+    picaroClone: null, // Pícaro (Doble Sombra): { x, y, radius, hp, maxHp, skill2Active, lastTickAt } — señuelo sin bloqueo/esquiva/escudo; explota al morir o al ser atravesado por la Estocada Fantasma (ver explodePicaroClone)
+    barbaroSpin: null, // Bárbaro (Torbellino de Espadas): { startAt, durationMs, lastOffset, hitSet, reducedMs } — 2 espadas giran 360° alrededor del jugador (ver applyBarbaroSpinHits/renderBarbaroSpin)
 
     potionCooldownUntil: 0,
 
@@ -118,11 +141,13 @@ const Combat = {
         this.leap = null;
         this.zones = [];
         this.dungeon = null;
-        this.skill3 = { aiming: false, arrowKillDmgBuffUntil: 0 };
+        this.skill3 = { aiming: false, arrowKillDmgBuffUntil: 0, guerreroExecuteDmgStacks: 0, picaroExplosionCritStacks: 0, tanqueActive: false, tanqueActiveUntil: 0, tanqueGiantStacks: 0 };
         this.skill3CooldownUntil = 0;
         this.vortex = null;
         this.arrow3 = null;
         this.dash3 = null;
+        this.picaroClone = null;
+        this.barbaroSpin = null;
         this.potionCooldownUntil = 0;
         this._basicStreak = 0;
         this.effects = [];
@@ -202,6 +227,17 @@ const Combat = {
                         this.leap.onHitEnemy(en);
                     }
                 });
+            }
+            // Doble Sombra: si la Estocada Fantasma (dash de tecla "1" del
+            // Pícaro) atraviesa al clon, este explota INSTANTÁNEAMENTE con
+            // el 100% del daño (mismo explodePicaroClone que si muriera por
+            // enemigos) — ver RT_SKILL3_ABILITIES.picaro.
+            if (this.leap.kind === 'picaro_dash' && this.picaroClone) {
+                const clone = this.picaroClone;
+                const dist = distancePointToSegment(clone.x, clone.y, prevX, prevY, this.player.x, this.player.y);
+                if (dist <= this.player.radius + clone.radius) {
+                    this.explodePicaroClone(clone);
+                }
             }
             if (t >= 1) {
                 const onComplete = this.leap.onComplete;
@@ -322,15 +358,17 @@ const Combat = {
             }
         }
 
-        // Golpe de Ejecución del Pícaro (tecla "3", ver RT_SKILL3_ABILITIES):
-        // dash de 100px que, a diferencia de TODOS los demás dashes/
-        // proyectiles (que atraviesan/golpean a todo lo que tocan), se
-        // DETIENE en el PRIMER enemigo encontrado — el jugador queda
+        // Golpe de Ejecución del Guerrero (tecla "3", ver
+        // RT_SKILL3_ABILITIES — transplantado del Pícaro a pedido del
+        // usuario): dash de 150px que, a diferencia de TODOS los demás
+        // dashes/proyectiles (que atraviesan/golpean a todo lo que tocan),
+        // se DETIENE en el PRIMER enemigo encontrado — el jugador queda
         // reposicionado justo frente a él (no se superponen), dispara un
         // cono pequeño + golpe único según su % de vida actual (ver
-        // getPicaroSkill3Damage; `null` = ejecución, mata directo). Si mata,
-        // reinicia el cooldown por completo (mismo patrón que la Flecha
-        // Certera del Arquero).
+        // getGuerreroExecuteDamage; `null` = ejecución, mata directo). Si
+        // mata, reinicia el cooldown por completo (mismo patrón que la
+        // Flecha Certera del Arquero) y suma +2%/kill de daño permanente
+        // (reemplazó la curación que tenía como habilidad del Pícaro).
         if (this.dash3) {
             const d = this.dash3;
             const prevX = d.x, prevY = d.y;
@@ -359,30 +397,37 @@ const Combat = {
                 this.effects.push({ kind: 'cone', followPlayer: true, dirX: d.dirX, dirY: d.dirY, range: d.cfg.coneRange, angle: d.cfg.coneAngle, color: d.cfg.color, createdAt: now, duration: 250 });
 
                 const hpPercent = hitEnemy.hp / hitEnemy.maxHp;
-                const baseDmg = getPicaroSkill3Damage(hpPercent);
-                let dealt;
+                const baseDmg = getGuerreroExecuteDamage(hpPercent);
+                let dmgDealtForHeal = 0;
                 if (baseDmg === null) {
-                    // Ejecución: mata directo, ignora defensa/mitigación.
-                    // "Daño realizado" para la curación = la vida que le
-                    // quedaba (no hay un valor de daño real en una ejecución).
-                    dealt = hitEnemy.hp;
+                    // Ejecución: mata directo, ignora defensa/mitigación. El
+                    // "daño realizado" para la curación se toma como la vida
+                    // que tenía antes de morir (no hay `dealt` real porque
+                    // no pasa por takeDamage) — siempre cura 100% (ver abajo).
+                    dmgDealtForHeal = hitEnemy.hp;
                     hitEnemy.hp = 0;
                     hitEnemy.alive = false;
                     if (this.spawnFloatingText) this.spawnFloatingText(hitEnemy.x, hitEnemy.y - hitEnemy.radius - 20, '💀 ¡Ejecutado!', d.cfg.color, 1200);
                 } else {
                     const dmg = this.computeDash3Damage(d, baseDmg);
                     const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
-                    dealt = hitEnemy.takeDamage(dmg, { flatPenetration });
+                    const dealt = hitEnemy.takeDamage(dmg, { flatPenetration });
                     this.floatDamage(hitEnemy, dealt, false);
+                    dmgDealtForHeal = dealt;
                 }
                 this.spawnImpactFlash(hitEnemy.x, hitEnemy.y, d.cfg.color);
+                // Cura 50% del daño realizado con esta habilidad, o 100% si
+                // el golpe mató al enemigo (ver RT_SKILL3_ABILITIES.guerrero).
+                if (dmgDealtForHeal > 0) {
+                    const healPercent = hitEnemy.alive ? d.cfg.healOnHitPercent : d.cfg.healOnKillPercent;
+                    this.player.heal(dmgDealtForHeal * healPercent);
+                }
                 if (!hitEnemy.alive) {
                     if (!hitEnemy._deathHandled) { hitEnemy._deathHandled = true; this.onEnemyDefeated(hitEnemy); }
                     this.skill3CooldownUntil = now; // reinicio COMPLETO del cooldown
-                    const healAmt = dealt * d.cfg.killHealPercent;
-                    if (healAmt > 0) {
-                        this.player.heal(healAmt);
-                        if (this.spawnFloatingText) this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `+${Math.round(healAmt)} HP`, '#7bffa0', 900);
+                    this.skill3.guerreroExecuteDmgStacks = Math.min(d.cfg.dmgStackMaxStacks, this.skill3.guerreroExecuteDmgStacks + 1);
+                    if (this.spawnFloatingText) {
+                        this.spawnFloatingText(this.player.x, this.player.y - this.player.radius - 30, `+${Math.round(d.cfg.dmgStackPerKillPercent * 100)}% daño`, d.cfg.color, 900);
                     }
                 }
                 this.dash3 = null;
@@ -396,6 +441,34 @@ const Combat = {
                 d.x = candX;
                 d.y = candY;
             }
+        }
+
+        // Torbellino de Espadas del Bárbaro (ver RT_SKILL3_ABILITIES.barbaro):
+        // avanza el ángulo acumulado de 0 a 2π a lo largo de durationMs y
+        // aplica los golpes del arco recién barrido este frame (ver
+        // applyBarbaroSpinHits) — barrido incremental, no puntual, mismo
+        // motivo que closestPointOnSegment: no saltearse enemigos entre frames.
+        if (this.barbaroSpin) {
+            const spin = this.barbaroSpin;
+            const t = Math.min(1, (now - spin.startAt) / spin.durationMs);
+            const currOffset = t * Math.PI * 2;
+            if (currOffset > spin.lastOffset) {
+                this.applyBarbaroSpinHits(spin.lastOffset, currOffset);
+                spin.lastOffset = currOffset;
+            }
+            if (t >= 1) this.barbaroSpin = null;
+        }
+
+        // Círculo del Gigante del Tanque (ver RT_SKILL3_ABILITIES.tanque):
+        // se apaga sola al cumplirse la duración (8s) o si el jugador
+        // cambió de clase activa (mismo criterio que el resto de buffs de
+        // clase) — al apagarse, los stacks de Gigante se resetean a 0
+        // (son "de la habilidad", no permanentes) y se recalcula la vida
+        // máxima para quitar el bono.
+        if (this.skill3.tanqueActive && (player.activeProfession !== 'tanque' || now >= this.skill3.tanqueActiveUntil)) {
+            this.skill3.tanqueActive = false;
+            this.skill3.tanqueGiantStacks = 0;
+            player.recalcMaxHp();
         }
 
         // Habilidad toggle del Ataque 2 (ver RT_TOGGLE_SKILLS): se apaga
@@ -416,12 +489,40 @@ const Combat = {
             }
         }
 
+        // Pulso de la Dagas Orbitales del CLON de Doble Sombra (ver
+        // fireSkill3PicaroCloneDash/tickPicaroCloneToggleSkill) — sigue
+        // corriendo de forma independiente al toggle real del jugador,
+        // según la "foto" tomada al crear el clon.
+        if (this.picaroClone && this.picaroClone.skill2Active) {
+            const cloneTickMs = RT_TOGGLE_SKILLS.picaro.tickMs;
+            if (now - this.picaroClone.lastTickAt >= cloneTickMs) {
+                this.picaroClone.lastTickAt = now;
+                this.tickPicaroCloneToggleSkill(this.picaroClone);
+            }
+        }
+
+        // Doble Sombra del Pícaro (ver RT_SKILL3_ABILITIES.picaro): mientras
+        // el clon exista, la IA de TODOS los enemigos (persecución, rango
+        // de ataque, todo) apunta a ÉL en vez del jugador real — así "no lo
+        // ven" sin tener que tocar Enemy.js. La invisibilidad en sí (sin
+        // clon) se resuelve más abajo, en performEnemyAttackRT: el golpe
+        // simplemente no conecta con nada.
+        const aiTarget = this.picaroClone
+            ? { x: this.picaroClone.x, y: this.picaroClone.y, radius: this.picaroClone.radius }
+            : player;
+
         enemies.forEach(en => {
             if (!en.alive) return;
-            en.update(dt, player, dungeon);
+            en.update(dt, aiTarget, dungeon);
             if (!en.alive) {
                 if (!en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
                 return;
+            }
+            // Círculo del Gigante del Tanque: arrastra a todo enemigo
+            // dentro del radio hacia el jugador cada frame, ADEMÁS de su
+            // movimiento normal de IA de arriba (ver RT_SKILL3_ABILITIES.tanque).
+            if (this.skill3.tanqueActive && player.activeProfession === 'tanque') {
+                this.tickTanqueCirclePull(en, dt, player, dungeon);
             }
             if (en.aiState === 'attacking' && now >= en.nextAttackAt) {
                 this.performEnemyAttackRT(en);
@@ -540,10 +641,12 @@ const Combat = {
         dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
         dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
         dmg *= (1 + this.getSkill3DamageBuffPercent(profId));
+        dmg *= (1 + this.getSkill3GuerreroDmgBonusPercent(profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
 
         const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE
-            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId);
+            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId) + this.getPicaroExplosionCritBonusPercent(profId);
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
         const effectiveAtk = {
             damage: dmg,
@@ -815,7 +918,9 @@ const Combat = {
 
                 const weapon = this.player.getCurrentWeapon();
                 let dmg = cfg.dmgBase * (weapon.tier ? weapon.tier.mult : 1) * (weapon.rarity ? weapon.rarity.mult : 1);
+                dmg *= (1 + this.getSkill3GuerreroDmgBonusPercent('guerrero'));
                 dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+                dmg *= (1 + this.player.getArmorDamageBonusPercent());
                 const flatPenetration = this.player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
                 const targets = this.getEnemiesInCircle(dest.x, dest.y, cfg.slamRadius);
                 targets.forEach(t => {
@@ -1138,7 +1243,143 @@ const Combat = {
 
         if (profId === 'mago') this.fireSkill3MagoVortex(cfg, dirX, dirY, aimDist);
         else if (profId === 'arquero') this.fireSkill3ArqueroArrow(cfg, dirX, dirY);
-        else if (profId === 'picaro') this.fireSkill3PicaroDash(cfg, dirX, dirY);
+        else if (profId === 'guerrero') this.fireSkill3GuerreroExecute(cfg, dirX, dirY);
+        else if (profId === 'picaro') this.fireSkill3PicaroCloneDash(cfg, dirX, dirY, aimDist);
+        else if (profId === 'tanque') this.fireSkill3TanqueCircle(cfg);
+        else if (profId === 'barbaro') this.fireSkill3BarbaroSpin(cfg);
+    },
+
+    // Tanque — Círculo del Gigante: sin dirección/aim real (círculo
+    // centrado en el propio jugador, sigue al pedido "un círculo alrededor
+    // del jugador"), pero mantiene el mismo flujo de mantener/soltar "3"
+    // que el resto de hechizos para no romper la UX establecida (ver
+    // renderSkill3Aim para la vista previa). Reinicia los stacks de
+    // Gigante de cualquier lanzamiento anterior.
+    fireSkill3TanqueCircle(cfg) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        this.skill3.tanqueActive = true;
+        this.skill3.tanqueActiveUntil = Date.now() + cfg.durationMs;
+        this.skill3.tanqueGiantStacks = 0;
+        this.player.recalcMaxHp();
+        this.effects.push({ kind: 'circle', x: this.player.x, y: this.player.y, followPlayer: true, range: cfg.radius, startRange: cfg.radius * 0.85, color: cfg.color, createdAt: Date.now(), duration: 400 });
+    },
+
+    // Arrastra UN enemigo hacia el jugador (mismo patrón que
+    // Enemy.stepToward, respeta paredes) — llamado desde updateRealtime
+    // para cada enemigo vivo dentro del radio del Círculo del Gigante.
+    tickTanqueCirclePull(en, dt, player, dungeon) {
+        const cfg = RT_SKILL3_ABILITIES.tanque;
+        const dist = Math.hypot(en.x - player.x, en.y - player.y);
+        if (dist > cfg.radius || dist < 1) return;
+        // Cap el paso a la distancia restante para no "pasarse" del jugador
+        // en un frame con dt grande (salto de rendimiento/timejump).
+        const step = Math.min(dist, cfg.pullSpeedPxPerSec * (dt / 1000));
+        const dx = (player.x - en.x) / dist, dy = (player.y - en.y) / dist;
+        const nx = en.x + dx * step, ny = en.y + dy * step;
+        if (!dungeon || dungeon.isWalkable(nx, en.y, en.radius)) en.x = nx;
+        if (!dungeon || dungeon.isWalkable(en.x, ny, en.radius)) en.y = ny;
+    },
+
+    // Tanque: -30% de daño recibido mientras el Círculo del Gigante esté
+    // activo — reducción DIRECTA (ver Player.takeDamage), no un bono de
+    // mitigación de armadura.
+    getSkill3TanqueDamageReducePercent(profId) {
+        if (profId !== 'tanque' || !this.skill3.tanqueActive) return 0;
+        return RT_SKILL3_ABILITIES.tanque.damageReducePercent;
+    },
+    // Tanque: +3%/stack de "Gigante" de resistencias (máx 10 stacks/30%) —
+    // mismo mecanismo que defPctPerStack (bono de mitigación de armadura).
+    getTanqueGiantDefenseBonusPercent(profId) {
+        if (profId !== 'tanque' || !this.skill3.tanqueActive) return 0;
+        const cfg = RT_SKILL3_ABILITIES.tanque;
+        return Math.min(cfg.giantMaxStacks * cfg.giantDefPerStackPercent, this.skill3.tanqueGiantStacks * cfg.giantDefPerStackPercent);
+    },
+    // Tanque: +10%/stack de "Gigante" de vida máxima (máx 10 stacks/100%) —
+    // multiplicador leído desde Player.recalcMaxHp.
+    getTanqueGiantMaxHpBonusPercent(profId) {
+        if (profId !== 'tanque' || !this.skill3.tanqueActive) return 0;
+        const cfg = RT_SKILL3_ABILITIES.tanque;
+        return Math.min(cfg.giantMaxStacks * cfg.giantHpPerStackPercent, this.skill3.tanqueGiantStacks * cfg.giantHpPerStackPercent);
+    },
+
+    // Bárbaro — Torbellino de Espadas: sin dirección/aim (mismo criterio
+    // "sin apuntar" que el Círculo del Gigante del Tanque). `lastOffset`
+    // arranca en 0 — el primer tick de updateRealtime ya aplica el primer
+    // tramo de barrido, no hace falta un golpe inicial aparte.
+    fireSkill3BarbaroSpin(cfg) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        this.barbaroSpin = { startAt: Date.now(), durationMs: cfg.durationMs, lastOffset: 0, hitSet: new Set(), reducedMs: 0 };
+    },
+
+    // Daño de golpe FIJO (no escala con arma/tier, ver RT_SKILL3_ABILITIES.
+    // barbaro.dmgPerHit) multiplicado por la misma cadena universal de
+    // bonos de daño que el resto de hechizos de tecla "3".
+    computeBarbaroSpinDamage() {
+        const cfg = RT_SKILL3_ABILITIES.barbaro;
+        const profId = this.player.activeProfession;
+        let dmg = cfg.dmgPerHit;
+        dmg *= (1 + this.getSkill2DamageBonusPercent(profId));
+        dmg *= (1 + this.getSkill1DamageBuffPercent(profId));
+        dmg *= (1 + this.getSkill3DamageBuffPercent(profId));
+        dmg *= (1 + this.getSkill3GuerreroDmgBonusPercent(profId));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
+        return Math.round(dmg);
+    },
+
+    // Robo de vida TOTAL actual del Bárbaro (encantamiento + Furia
+    // Sangrienta + stacks de Hachas Orbitales) — mismo cálculo combinado
+    // que ya usan tickToggleSkill/resolvePlayerAttack para el robo de vida
+    // normal, reutilizado acá como base para el x2 del Torbellino de Espadas.
+    getBarbaroCurrentLifestealPercent() {
+        const player = this.player;
+        if (!player) return 0;
+        const eff = player.getActiveEnchantEffects();
+        return (eff.lifestealPercent || 0) + this.getSkill2LifestealBonusPercent('barbaro') + this.getSkill1LifestealBonusPercent('barbaro');
+    },
+
+    // Aplica los golpes de las 2 espadas para el tramo angular recién
+    // barrido este frame (prevOffset -> currOffset, ver updateRealtime).
+    // Cada espada arranca 180° opuesta a la otra (0 y π); con el tiempo
+    // ambas terminan pasando por todos los ángulos (una a mitad de la
+    // animación, la otra al otro extremo) — hitSet es lo que garantiza que
+    // cada enemigo sólo sea tocado UNA vez por lanzamiento, sin importar
+    // cuál de las dos llegue primero a su ángulo.
+    applyBarbaroSpinHits(prevOffset, currOffset) {
+        const spin = this.barbaroSpin;
+        if (!spin) return;
+        const player = this.player;
+        const cfg = RT_SKILL3_ABILITIES.barbaro;
+        const innerR = player.radius;
+        const outerR = player.radius + cfg.bladeLength;
+        const dmg = this.computeBarbaroSpinDamage();
+        const lifestealPct = this.getBarbaroCurrentLifestealPercent() * cfg.lifestealMultiplier;
+        const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+        let totalHeal = 0;
+        [0, Math.PI].forEach(baseAngle => {
+            const from = prevOffset + baseAngle, to = currOffset + baseAngle;
+            this.enemies.forEach(en => {
+                if (!en.alive || spin.hitSet.has(en)) return;
+                const dist = Math.hypot(en.x - player.x, en.y - player.y);
+                if (dist < innerR - en.radius || dist > outerR + en.radius) return;
+                const angleTo = Math.atan2(en.y - player.y, en.x - player.x);
+                if (!isAngleInSweep(angleTo, from, to)) return;
+                spin.hitSet.add(en);
+                const dealt = en.takeDamage(dmg, { flatPenetration });
+                this.spawnImpactFlash(en.x, en.y, cfg.color);
+                this.floatDamage(en, dealt, false);
+                if (lifestealPct > 0) totalHeal += Math.round(dmg * lifestealPct);
+                if (!en.alive) {
+                    if (!en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
+                    const reduceMs = Math.min(cfg.cdReductionPerKillMs, cfg.cdReductionMaxMs - spin.reducedMs);
+                    if (reduceMs > 0) {
+                        this.skill3CooldownUntil = Math.max(Date.now(), this.skill3CooldownUntil - reduceMs);
+                        spin.reducedMs += reduceMs;
+                    }
+                }
+            });
+        });
+        if (totalHeal > 0) player.heal(totalHeal);
     },
 
     // Mago — Vórtice Arcano: ver RT_SKILL3_ABILITIES.mago para la fórmula
@@ -1183,6 +1424,7 @@ const Combat = {
         dmg *= (1 + this.getSkill1DamageBuffPercent(vortex.profId));
         dmg *= (1 + this.getSkill3DamageBuffPercent(vortex.profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
         return dmg;
     },
 
@@ -1218,6 +1460,7 @@ const Combat = {
         dmg *= (1 + this.getSkill1DamageBuffPercent(arrow.profId));
         dmg *= (1 + this.getSkill3DamageBuffPercent(arrow.profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
         return dmg;
     },
 
@@ -1228,19 +1471,35 @@ const Combat = {
         }
         return 0;
     },
+    // Guerrero: +2%/kill de daño PERMANENTE con el Golpe de Ejecución (máx
+    // 10 stacks/20%, ver skill3.guerreroExecuteDmgStacks) — reemplazó la
+    // curación que tenía cuando era una habilidad del Pícaro.
+    getSkill3GuerreroDmgBonusPercent(profId) {
+        if (profId !== 'guerrero') return 0;
+        const cfg = RT_SKILL3_ABILITIES.guerrero;
+        return Math.min(cfg.dmgStackMaxStacks * cfg.dmgStackPerKillPercent, this.skill3.guerreroExecuteDmgStacks * cfg.dmgStackPerKillPercent);
+    },
+    // Pícaro: +2%/kill de crítico PERMANENTE con la explosión del clon de
+    // Doble Sombra (máx 10 stacks/20%, ver skill3.picaroExplosionCritStacks).
+    getPicaroExplosionCritBonusPercent(profId) {
+        if (profId !== 'picaro') return 0;
+        const cfg = RT_SKILL3_ABILITIES.picaro;
+        return Math.min(cfg.explosionCritMaxStacks * cfg.explosionCritPerKillPercent, this.skill3.picaroExplosionCritStacks * cfg.explosionCritPerKillPercent);
+    },
 
-    // Pícaro — Golpe de Ejecución: ver RT_SKILL3_ABILITIES.picaro. Dash
+    // Guerrero — Golpe de Ejecución: ver RT_SKILL3_ABILITIES.guerrero. Dash
     // corto de duración FIJA (100ms, no viaja "a velocidad constante" como
-    // el vórtice/flecha) — mismo estilo que su propia Estocada Fantasma de
-    // tecla "1". No se acorta por la distancia al mouse (mismo criterio
-    // que el resto de dashes, ver fireSkill1Picaro).
-    fireSkill3PicaroDash(cfg, dirX, dirY) {
+    // el vórtice/flecha) — mismo estilo que la Estocada Fantasma del
+    // Pícaro de tecla "1" (de donde se transplantó esta habilidad). No se
+    // acorta por la distancia al mouse (mismo criterio que el resto de
+    // dashes de este tipo).
+    fireSkill3GuerreroExecute(cfg, dirX, dirY) {
         this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
         const player = this.player;
         const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, cfg.dashRange, player.radius);
         const weapon = player.getCurrentWeapon();
         this.dash3 = {
-            profId: 'picaro', cfg,
+            profId: 'guerrero', cfg,
             startX: player.x, startY: player.y,
             endX: dest.x, endY: dest.y,
             x: player.x, y: player.y,
@@ -1258,8 +1517,114 @@ const Combat = {
         let dmg = baseDamage * dash.tierMult * dash.rarityMult;
         dmg *= (1 + this.getSkill1DamageBuffPercent(dash.profId));
         dmg *= (1 + this.getSkill3DamageBuffPercent(dash.profId));
+        dmg *= (1 + this.getSkill3GuerreroDmgBonusPercent(dash.profId));
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
         return dmg;
+    },
+
+    // Pícaro — Doble Sombra: ver RT_SKILL3_ABILITIES.picaro. El dash en sí
+    // NO hace daño (sweep desactivado) y SÍ se acorta por la distancia al
+    // mouse (aimDist, como el Salto Sísmico/Parpadeo Arcano) — el jugador
+    // elige dónde caer dentro del rango. Deja el clon en la posición de
+    // ORIGEN (antes de moverse) con la vida actual del jugador, y una
+    // "foto" de si la Dagas Orbitales estaba activa (ver
+    // tickPicaroCloneToggleSkill) — la invisibilidad arranca YA, no al
+    // terminar el dash.
+    fireSkill3PicaroCloneDash(cfg, dirX, dirY, aimDist) {
+        this.skill3CooldownUntil = Date.now() + cfg.cooldownMs;
+        const player = this.player;
+        const travelDist = Math.min(cfg.dashRange, aimDist);
+        const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, travelDist, player.radius);
+
+        this.picaroClone = {
+            x: player.x, y: player.y, radius: player.radius,
+            hp: player.hp, maxHp: player.hp,
+            skill2Active: this.skill2.active && this.skill2.profId === 'picaro',
+            lastTickAt: Date.now(),
+        };
+
+        this.startLeap('picaro_clone_dash', dest.x, dest.y, cfg.dashDurationMs, {});
+        player.invisibleUntil = Date.now() + cfg.invisibleDurationMs;
+    },
+
+    // Pulso automático del clon (mismas fórmulas que Combat.tickToggleSkill,
+    // pero centrado en el clon en vez del jugador) — solo corre mientras
+    // `clone.skill2Active` (fotografiado al crear el clon, ver
+    // fireSkill3PicaroCloneDash) siga siendo true.
+    tickPicaroCloneToggleSkill(clone) {
+        const player = this.player;
+        const cfg = RT_TOGGLE_SKILLS.picaro;
+        const effRadius = this.getSkill2EffectiveRadius('picaro');
+        const targets = this.getEnemiesInCircle(clone.x, clone.y, effRadius);
+        if (!targets.length) return;
+
+        const eff = player.getActiveEnchantEffects();
+        const weapon = player.getCurrentWeapon();
+        const tierMult = weapon.tier ? weapon.tier.mult : 1;
+        const rarityMult = weapon.rarity ? weapon.rarity.mult : 1;
+        const baseDamage = cfg.dmgBase * tierMult * rarityMult;
+        const potenciaMult = 1 + player.stats.potencia * STAT_POTENCIA_DMG_PERCENT;
+        let dmg = baseDamage * potenciaMult * (1 + eff.dmgBonusPercent);
+        dmg *= (1 + this.getSkill2DamageBonusPercent('picaro'));
+        dmg *= (1 + this.getSkill1DamageBuffPercent('picaro'));
+        dmg *= (1 + this.getSkill3DamageBuffPercent('picaro'));
+        dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
+
+        const critBase = getWeaponCritBase('picaro') + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE
+            + this.getSkill2CritChanceBonusPercent('picaro') + this.getPicaroDashCritBonusPercent('picaro') + this.getPicaroExplosionCritBonusPercent('picaro');
+        const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
+        const effectiveAtk = {
+            damage: dmg,
+            critChance: critBase + eff.critChanceBonus,
+            critMultiplier: Math.max(1.5, eff.critMultiplier),
+            penetratePercent: Math.min(0.95, eff.ignoreDefensePercent),
+            flatPenetration,
+        };
+        this.resolveAttackDamage(effectiveAtk, targets, eff);
+        this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
+
+        this.effects.push({ kind: 'circle', x: clone.x, y: clone.y, followPlayer: false, range: effRadius, startRange: effRadius * 0.85, color: cfg.color, createdAt: Date.now(), duration: 200 });
+    },
+
+    // Explota el clon del Pícaro (por perder toda su vida, o por ser
+    // atravesado por la Estocada Fantasma — ver updateRealtime en ambos
+    // casos): círculos expansivos + daño a todo enemigo en el radio. Cada
+    // enemigo que muere suma stacks de crítico permanente y reduce el
+    // cooldown (ver RT_SKILL3_ABILITIES.picaro/getPicaroExplosionCritBonusPercent).
+    explodePicaroClone(clone) {
+        const cfg = RT_SKILL3_ABILITIES.picaro;
+        const player = this.player;
+        const weapon = player.getCurrentWeapon();
+        const tierMult = weapon.tier ? weapon.tier.mult : 1;
+        const rarityMult = weapon.rarity ? weapon.rarity.mult : 1;
+        const dmg = cfg.cloneExplosionDamage * tierMult * rarityMult
+            * (1 + this.getSkill1DamageBuffPercent('picaro'))
+            * (1 + this.getSkill3DamageBuffPercent('picaro'))
+            * (1 + this.getPlayerZoneDamageBonusPercent());
+
+        const targets = this.getEnemiesInCircle(clone.x, clone.y, cfg.cloneExplosionRadius);
+        let kills = 0;
+        targets.forEach(en => {
+            const dealt = en.takeDamage(dmg, {});
+            this.spawnImpactFlash(en.x, en.y, cfg.color);
+            this.floatDamage(en, dealt, false);
+            if (!en.alive) {
+                if (!en._deathHandled) { en._deathHandled = true; this.onEnemyDefeated(en); }
+                kills++;
+            }
+        });
+        if (kills > 0) {
+            this.skill3.picaroExplosionCritStacks = Math.min(cfg.explosionCritMaxStacks, this.skill3.picaroExplosionCritStacks + kills);
+            const reduceKills = Math.min(kills, cfg.cdReductionMaxKills);
+            this.skill3CooldownUntil = Math.max(Date.now(), this.skill3CooldownUntil - reduceKills * cfg.cdReductionPerKillMs);
+        }
+        const now = Date.now();
+        [0, 70, 140].forEach(delay => {
+            this.effects.push({ kind: 'circle', x: clone.x, y: clone.y, followPlayer: false, range: cfg.cloneExplosionRadius, startRange: 0, color: cfg.color, createdAt: now + delay, duration: 400 });
+        });
+        if (this.picaroClone === clone) this.picaroClone = null;
     },
 
     // Vista previa mientras se mantiene "3" (ver startAimSkill3): línea
@@ -1282,13 +1647,47 @@ const Combat = {
             dirX /= len; dirY /= len;
         }
 
+        // Tanque: sin dirección — círculo de vista previa centrado en el
+        // jugador (mismo dibujo que Bastión, tecla "1"), no una línea.
+        if (profId === 'tanque') {
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, cfg.radius, 0, Math.PI * 2);
+            ctx.strokeStyle = cfg.color;
+            ctx.globalAlpha = 0.6;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.globalAlpha = 0.12;
+            ctx.fillStyle = cfg.color;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            return;
+        }
+        // Bárbaro: sin dirección tampoco — círculo de vista previa mostrando
+        // el radio de barrido de las espadas (player.radius + bladeLength).
+        if (profId === 'barbaro') {
+            const r = player.radius + cfg.bladeLength;
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, r, 0, Math.PI * 2);
+            ctx.strokeStyle = cfg.color;
+            ctx.globalAlpha = 0.6;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.globalAlpha = 0.12;
+            ctx.fillStyle = cfg.color;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            return;
+        }
+
         const maxRange = cfg.maxTravelDist || cfg.dashRange || 0;
-        // Arquero/Pícaro: ninguno de los dos dashes/proyectiles se acorta
+        // Arquero/Guerrero: ninguno de los dos dashes/proyectiles se acorta
         // por la distancia al mouse (ver fireSkill3ArqueroArrow/
-        // fireSkill3PicaroDash) — la vista previa muestra siempre el
-        // alcance máximo real (pared o maxRange), no aimDist.
+        // fireSkill3GuerreroExecute) — la vista previa muestra siempre el
+        // alcance máximo real (pared o maxRange), no aimDist. Pícaro (Doble
+        // Sombra) SÍ se acorta (ver fireSkill3PicaroCloneDash), cae en la
+        // rama `else` como el resto de los hechizos con aimDist.
         let lineDist;
-        if (profId === 'arquero' || profId === 'picaro') {
+        if (profId === 'arquero' || profId === 'guerrero') {
             const dest = this.computeWalkableDestination(player.x, player.y, dirX, dirY, maxRange, 5);
             lineDist = Math.hypot(dest.x - player.x, dest.y - player.y);
         } else {
@@ -1402,6 +1801,91 @@ const Combat = {
         ctx.fill();
     },
 
+    // Dibuja el clon de Doble Sombra (llamado desde game.js/render(),
+    // dentro del translate de cámara): círculo semitransparente + emoji +
+    // barra de vida propia (para distinguirlo del jugador real, ver
+    // RT_SKILL3_ABILITIES.picaro).
+    renderPicaroClone(ctx) {
+        const clone = this.picaroClone;
+        if (!clone) return;
+        const cfg = RT_SKILL3_ABILITIES.picaro;
+
+        ctx.globalAlpha = 0.55;
+        ctx.beginPath();
+        ctx.arc(clone.x, clone.y, clone.radius, 0, Math.PI * 2);
+        ctx.fillStyle = cfg.color;
+        ctx.fill();
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.stroke();
+        ctx.font = `${Math.round(clone.radius * 1.3)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(cfg.emoji, clone.x, clone.y + 1);
+        ctx.globalAlpha = 1;
+
+        const w = clone.radius * 2.2, h = 5;
+        const pct = Math.max(0, clone.hp / clone.maxHp);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(clone.x - w / 2, clone.y - clone.radius - 14, w, h);
+        ctx.fillStyle = '#a0e0ff';
+        ctx.fillRect(clone.x - w / 2, clone.y - clone.radius - 14, w * pct, h);
+    },
+
+    // Círculo del Gigante del Tanque: anillo PERSISTENTE mientras esté
+    // activo (a diferencia del resto de efectos, que son transitorios vía
+    // `effects`) — sigue al jugador cada frame, ver RT_SKILL3_ABILITIES.tanque.
+    renderTanqueCircle(ctx) {
+        if (!this.skill3.tanqueActive || !this.player) return;
+        const cfg = RT_SKILL3_ABILITIES.tanque;
+        ctx.beginPath();
+        ctx.arc(this.player.x, this.player.y, cfg.radius, 0, Math.PI * 2);
+        ctx.globalAlpha = 0.08;
+        ctx.fillStyle = cfg.color;
+        ctx.fill();
+        ctx.globalAlpha = 0.5;
+        ctx.strokeStyle = cfg.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+    },
+
+    // Torbellino de Espadas del Bárbaro: 2 hojas dibujadas como polígono
+    // (ancho en el mango, angosto en la punta) rotadas alrededor del
+    // jugador — mango en el radio del jugador (cerca de él), punta a
+    // bladeLength px hacia afuera, exactamente igual que la geometría de
+    // colisión de applyBarbaroSpinHits.
+    renderBarbaroSpin(ctx) {
+        const spin = this.barbaroSpin;
+        if (!spin || !this.player) return;
+        const cfg = RT_SKILL3_ABILITIES.barbaro;
+        const player = this.player;
+        const t = Math.min(1, (Date.now() - spin.startAt) / spin.durationMs);
+        const offset = t * Math.PI * 2;
+        [0, Math.PI].forEach(baseAngle => {
+            const angle = baseAngle + offset;
+            ctx.save();
+            ctx.translate(player.x, player.y);
+            ctx.rotate(angle);
+            ctx.translate(player.radius, 0);
+            ctx.fillStyle = cfg.color;
+            ctx.shadowColor = cfg.color;
+            ctx.shadowBlur = 6;
+            ctx.beginPath();
+            ctx.moveTo(0, -5);
+            ctx.lineTo(0, 5);
+            ctx.lineTo(cfg.bladeLength * 0.85, 2);
+            ctx.lineTo(cfg.bladeLength, 0);
+            ctx.lineTo(cfg.bladeLength * 0.85, -2);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        });
+        ctx.shadowBlur = 0;
+    },
+
     // Enemigos dentro de un cono frontal (usado por Ataque 1/2).
     getEnemiesInCone(originX, originY, dirX, dirY, range, angleDeg) {
         const halfAngleRad = (angleDeg / 2) * Math.PI / 180;
@@ -1501,12 +1985,14 @@ const Combat = {
         // Arquero: +10% de daño temporal tras matar con la Flecha Certera
         // (ver RT_SKILL3_ABILITIES.arquero) — 0 si no aplica.
         dmg *= (1 + this.getSkill3DamageBuffPercent(profId));
+        dmg *= (1 + this.getSkill3GuerreroDmgBonusPercent(profId));
         // +25% mientras el jugador esté parado en la zona del Salto Sísmico
         // del Guerrero (ver RT_SKILL1_ABILITIES.guerrero) — 0 si no aplica.
         dmg *= (1 + this.getPlayerZoneDamageBonusPercent());
+        dmg *= (1 + this.player.getArmorDamageBonusPercent());
 
         const critBase = getWeaponCritBase(profId) + player.stats.suerte * STAT_SUERTE_CRIT_CHANCE
-            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId);
+            + this.getSkill2CritChanceBonusPercent(profId) + this.getPicaroDashCritBonusPercent(profId) + this.getPicaroExplosionCritBonusPercent(profId);
         const flatPenetration = player.stats.destreza * STAT_DESTREZA_ARMOR_PEN;
 
         const effectiveAtk = {
@@ -2016,6 +2502,24 @@ const Combat = {
     // Mismo orden de evaluación defensiva que antes: Bloqueo -> Esquiva ->
     // daño -> Contraataque (independiente de si bloqueó/esquivó).
     performEnemyAttackRT(enemy) {
+        // Golpe de Ejecución del Guerrero: invulnerable durante el dash
+        // (0.1s fijos, ver RT_SKILL3_ABILITIES.guerrero/
+        // fireSkill3GuerreroExecute) — el golpe no conecta con nada
+        // mientras dure.
+        if (this.dash3 && this.dash3.profId === 'guerrero') {
+            return;
+        }
+        // Doble Sombra del Pícaro: con clon vivo, el golpe va contra ÉL
+        // (ver performEnemyAttackOnClone); sin clon pero todavía invisible,
+        // el jugador real no es alcanzable — el golpe no conecta con nada.
+        if (this.picaroClone) {
+            this.performEnemyAttackOnClone(enemy);
+            return;
+        }
+        if (this.player.invisibleUntil && Date.now() < this.player.invisibleUntil) {
+            return;
+        }
+
         this.spawnEnemyBolt(enemy);
 
         let baseDmg = enemy.type.dmg;
@@ -2080,6 +2584,18 @@ const Combat = {
                 this.floatDamage(enemy, dealt, false);
                 if (!enemy.alive && !enemy._deathHandled) { enemy._deathHandled = true; this.onEnemyDefeated(enemy); }
             }
+            // Círculo del Gigante del Tanque: el enemigo recibe el 100% de
+            // su daño BASE como reflejo — usa `baseDmg` (antes de
+            // bloqueo/reducción), tal como pide el pedido ("el daño base
+            // del ataque"), NO `incomingRaw` (que ya tiene el -50% del
+            // bloqueo aplicado, a diferencia del reflejo de escudo de arriba).
+            if (this.skill3.tanqueActive && player.activeProfession === 'tanque' && enemy.alive) {
+                const tCfg = RT_SKILL3_ABILITIES.tanque;
+                const reflectDmg = baseDmg * tCfg.reflectPercent;
+                const dealt = enemy.takeDamage(reflectDmg, { flatPenetration: player.stats.destreza * STAT_DESTREZA_ARMOR_PEN });
+                this.floatDamage(enemy, dealt, false);
+                if (!enemy.alive && !enemy._deathHandled) { enemy._deathHandled = true; this.onEnemyDefeated(enemy); }
+            }
             if (shield && shield.burnAttacker && enemy.alive) {
                 enemy.burn = { dmgPerSec: shield.burnAttacker.dmg, expiresAt: Date.now() + shield.burnAttacker.turns * 1000, lastTickAt: Date.now() };
             }
@@ -2101,6 +2617,26 @@ const Combat = {
         }
 
         if (enemy.type.ability) this.tickBossAbility(enemy);
+    },
+
+    // Golpe de un enemigo contra el clon de Doble Sombra (ver
+    // performEnemyAttackRT): el clon es un señuelo simple, sin bloqueo/
+    // esquiva/escudo — recibe el golpe de lleno. Si su vida llega a 0, explota.
+    performEnemyAttackOnClone(enemy) {
+        const clone = this.picaroClone;
+        if (!clone) return;
+        let baseDmg = enemy.type.dmg;
+        if (enemy.attackMod && Date.now() < enemy.attackMod.expiresAt) {
+            baseDmg = Math.max(1, baseDmg - enemy.attackMod.flat);
+        }
+        if (enemy.type.ability === 'damageMultiplier') baseDmg = Math.round(baseDmg * 1.6);
+        baseDmg = Math.round(baseDmg * this.getEnemyZoneDamageMultiplier(enemy));
+
+        clone.hp = Math.max(0, clone.hp - baseDmg);
+        if (this.spawnFloatingText) this.spawnFloatingText(clone.x, clone.y - clone.radius - 12, `-${baseDmg}`, '#ff5c5c');
+        this.spawnImpactFlash(clone.x, clone.y, '#ff5c5c');
+
+        if (clone.hp <= 0) this.explodePicaroClone(clone);
     },
 
     // Habilidades de jefe: antes se activaban al INICIO de su turno; ahora
@@ -2171,6 +2707,33 @@ const Combat = {
         }
     },
 
+    // Aplica el drop de piezas de EQUIPO (armadura o arma, mismo mecanismo
+    // para ambas, ver EQUIPMENT_PIECE_DROP_CONFIG) para todas las rarezas
+    // <= `rarityIdx` (la del enemigo muerto). `idFn(rarityId)` genera el id
+    // de material concreto a otorgar (ya resuelve al azar el subtipo/
+    // profesión, ver getArmorPieceId/getWeaponPieceId) — se llama una vez
+    // por CADA unidad individual que sale.
+    rollEquipmentPieceDrops(rarityIdx, floor, grant, idFn) {
+        const dropBonus = getPieceDropBonusPercent(floor);
+        for (let ri = 0; ri <= rarityIdx; ri++) {
+            const dropRarityId = MONSTER_RARITIES[ri].id;
+            const dropCfg = EQUIPMENT_PIECE_DROP_CONFIG[dropRarityId];
+            if (!dropCfg) continue;
+            let pieceCount = 0;
+            if (dropCfg.guaranteed) {
+                pieceCount += dropCfg.guaranteed;
+                for (let i = 0; i < dropCfg.extraRolls; i++) {
+                    if (Math.random() < Math.min(1, dropCfg.chancePerRoll + dropBonus)) pieceCount++;
+                }
+            } else if (Math.random() < Math.min(1, dropCfg.chance + dropBonus)) {
+                pieceCount = dropCfg.min + Math.floor(Math.random() * (dropCfg.max - dropCfg.min + 1));
+            }
+            for (let i = 0; i < pieceCount; i++) {
+                grant(idFn(dropRarityId), 1);
+            }
+        }
+    },
+
     onEnemyDefeated(target) {
         const player = this.player;
         const rarity = target.type.rarity || MONSTER_RARITIES[0];
@@ -2196,6 +2759,23 @@ const Combat = {
             const cfg = RT_SKILL1_ABILITIES.barbaro;
             player.heal(player.maxHp * cfg.killHealPercent);
             this.skill1.barbaroActiveUntil += cfg.durationPerKillMs;
+        }
+
+        // Círculo del Gigante del Tanque (ver RT_SKILL3_ABILITIES.tanque):
+        // cada muerte mientras está activa cura 10% de vida máxima y suma 1
+        // stack de "Gigante" (+10% vida máxima / +3% resistencias por
+        // stack, máx 10), sin importar qué mató al enemigo (reflejo,
+        // ataque normal, etc.).
+        if (this.skill3.tanqueActive && player.activeProfession === 'tanque') {
+            const cfg = RT_SKILL3_ABILITIES.tanque;
+            player.heal(player.maxHp * cfg.killHealPercent);
+            if (this.skill3.tanqueGiantStacks < cfg.giantMaxStacks) {
+                this.skill3.tanqueGiantStacks++;
+                player.recalcMaxHp();
+                if (this.spawnFloatingText) {
+                    this.spawnFloatingText(player.x, player.y - player.radius - 30, `🗿 Gigante x${this.skill3.tanqueGiantStacks}`, cfg.color, 1000);
+                }
+            }
         }
 
         // Tamaño de "grupo": enemigos vivos cerca del que acaba de morir,
@@ -2242,6 +2822,27 @@ const Combat = {
 
         const { tierId: nucleoTierId, count: nucleoCount } = rollNucleoDrops(player.floor);
         grant(getNucleoId(rarity.id, nucleoTierId), gm(nucleoCount));
+
+        // Piezas de equipo (armadura Y arma, ver rollEquipmentPieceDrops —
+        // "todo el % de drop y funcionamiento es exactamente igual" para
+        // ambas, pedido explícito): cada rareza <= la del enemigo muerto se
+        // evalúa de forma INDEPENDIENTE — una pieza épica solo puede salir
+        // de un enemigo épico o superior, y un enemigo mítico puede soltar
+        // piezas de VARIAS rarezas a la vez en la misma muerte (lectura
+        // literal del pedido: "solo pueden ser soltadas por enemigos con
+        // esa rareza o superior", no "solo 1 rareza por muerte"). El nivel
+        // de la pieza es el tier de material del piso (mismo bracket que
+        // mena/núcleos); el subtipo/profesión se sortea al azar por CADA
+        // unidad individual (no se especificó cómo elegirlo). Cantidades
+        // SIN el multiplicador de grupo (gm) — se respetan los números
+        // exactos pedidos por el usuario, sin otro escalado encima.
+        const armorSubtypeIds = Object.keys(ARMOR_PIECE_VARIANTS);
+        this.rollEquipmentPieceDrops(rarityIdx, player.floor, grant,
+            dropRarityId => getArmorPieceId(armorSubtypeIds[Math.floor(Math.random() * armorSubtypeIds.length)], dropRarityId, materialTierId));
+
+        const weaponProfIds = Object.keys(WEAPON_PIECE_TYPES);
+        this.rollEquipmentPieceDrops(rarityIdx, player.floor, grant,
+            dropRarityId => getWeaponPieceId(weaponProfIds[Math.floor(Math.random() * weaponProfIds.length)], dropRarityId, materialTierId));
 
         if (isFinalBoss) {
             const pisoEnRango = target.type.pisoEnRango || 10;

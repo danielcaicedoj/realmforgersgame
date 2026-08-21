@@ -18,6 +18,7 @@ function saveGame(player) {
         finalBossFloor: player.finalBossFloor,
         craftedItems: player.craftedItems,
         equippedCraftedByProf: player.equippedCraftedByProf,
+        equippedArmorBySlot: player.equippedArmorBySlot,
         mounts: player.mounts,
         equippedMountId: player.equippedMountId,
         foodBuffs: player.foodBuffs,

@@ -55,8 +55,15 @@ class Player {
         // pero se re-materializa al volver vía teletransporte al jefe.
         this.finalBossFloor = null;
 
-        this.craftedItems = []; // [{id, kind:'weapon'|'armor', profId, tierId, rarityId, damage|defense}]
-        this.equippedCraftedByProf = {}; // profId -> craftedItem.id (o null = usar el arma/armadura automática por nivel)
+        this.craftedItems = []; // armas: {id, kind:'weapon', profId, tierId, rarityId, damage}; armaduras: {id, kind:'armor', slot, subtype, tierId, rarityId, defense, dmgBonusPercent, hpBonusPercent}
+        this.equippedCraftedByProf = {}; // profId -> craftedItem.id (arma, o null = usar el arma automática por nivel)
+
+        // Armadura (ver ARMOR_SLOTS en constants.js): 3 casilleros
+        // independientes (casco/pechera/botas), cada uno con su propia
+        // pieza crafteada (o null = ese casillero va vacío, sin bono — la
+        // armadura "automática" de respaldo solo aplica si los 3 están
+        // vacíos a la vez, ver getArmorInfo).
+        this.equippedArmorBySlot = { casco: null, pechera: null, botas: null };
 
         // Monturas (ver mounts.js): solo 1 equipada a la vez.
         this.mounts = []; // [{id, tierId, rarityId, speedPercent, createdAt}]
@@ -86,6 +93,11 @@ class Player {
         // únicos de cada Tier (Ataque 3). Nunca se persiste (combate-only,
         // como burn).
         this.shield = null;
+
+        // Invisibilidad de Doble Sombra del Pícaro (ver
+        // RT_SKILL3_ABILITIES.picaro/Combat.performEnemyAttackRT): mientras
+        // dure, ningún enemigo lo ataca. Combate-only, no se persiste.
+        this.invisibleUntil = 0;
 
         this.levelUpFlashes = []; // {professionId, until}
         this._foodTurnRegenTickAt = 0; // ver getFoodTurnRegen/tick(): antes curaba 1 vez por turno, ahora 1 vez/seg
@@ -128,13 +140,26 @@ class Player {
         if (typeof data.finalBossFloor === 'number') this.finalBossFloor = data.finalBossFloor;
         // Objetos crafteados de profesiones eliminadas (ej. Segador) se
         // descartan directamente en vez de quedar huérfanos en el bolso.
+        // Las armaduras VIEJAS (1 sola pieza, profId 'armadura', sin
+        // slot/subtype) también se descartan acá: son de un esquema
+        // incompatible con el nuevo sistema de 3 piezas, no hay migración.
         if (Array.isArray(data.craftedItems)) {
-            this.craftedItems = data.craftedItems.filter(it => getProfession(it.profId));
+            this.craftedItems = data.craftedItems.filter(it =>
+                it.kind === 'armor'
+                    ? (ARMOR_SLOTS.some(s => s.id === it.slot) && ARMOR_PIECE_VARIANTS[it.subtype])
+                    : getProfession(it.profId)
+            );
         }
         if (data.equippedCraftedByProf) {
             this.equippedCraftedByProf = {};
             Object.keys(data.equippedCraftedByProf).forEach(profId => {
                 if (getProfession(profId)) this.equippedCraftedByProf[profId] = data.equippedCraftedByProf[profId];
+            });
+        }
+        if (data.equippedArmorBySlot) {
+            ARMOR_SLOTS.forEach(s => {
+                const itemId = data.equippedArmorBySlot[s.id];
+                if (itemId && this.craftedItems.some(it => it.id === itemId)) this.equippedArmorBySlot[s.id] = itemId;
             });
         }
         if (Array.isArray(data.mounts)) this.mounts = data.mounts;
@@ -156,7 +181,18 @@ class Player {
     // para no exceder el nuevo máximo (no cura de más al subir Constitución).
     recalcMaxHp() {
         const foodVida = this.foodBuffs.filter(b => b.stat === 'vida').reduce((s, b) => s + b.amount, 0);
-        this.maxHp = 100 + this.level * 10 + this.stats.constitucion * STAT_CONSTITUCION_HP + foodVida;
+        const baseMaxHp = 100 + this.level * 10 + this.stats.constitucion * STAT_CONSTITUCION_HP + foodVida;
+        // Tanque: +10%/stack de "Gigante" mientras el Círculo del Gigante
+        // (tecla "3") esté activo (ver RT_SKILL3_ABILITIES.tanque/
+        // Combat.getTanqueGiantMaxHpBonusPercent) — multiplicador, no un
+        // monto plano, para no romper la fórmula de vida base existente.
+        const giantBonus = Combat.getTanqueGiantMaxHpBonusPercent(this.activeProfession);
+        // Armadura: suma de %vida extra de las 3 piezas equipadas (ver
+        // getArmorHpBonusPercent/ARMOR_PIECE_VARIANTS) — se combina de
+        // forma ADITIVA con el bono de Gigante (no multiplicativa entre
+        // sí), mismo criterio que el resto de bonos porcentuales del juego.
+        const armorHpBonus = this.getArmorHpBonusPercent();
+        this.maxHp = Math.round(baseMaxHp * (1 + giantBonus + armorHpBonus));
         this.hp = Math.min(this.hp, this.maxHp);
     }
 
@@ -334,13 +370,29 @@ class Player {
         return sums;
     }
 
+    // Pieza de armadura equipada en un casillero (o null si está vacío).
+    getEquippedArmorPiece(slot) {
+        const itemId = this.equippedArmorBySlot[slot];
+        if (!itemId) return null;
+        return this.craftedItems.find(it => it.id === itemId && it.kind === 'armor') || null;
+    }
+
+    getEquippedArmorPieces() {
+        return ARMOR_SLOTS.map(s => this.getEquippedArmorPiece(s.id)).filter(Boolean);
+    }
+
+    // Suma de defensa de las 3 piezas equipadas (0 si un casillero está
+    // vacío — sin relleno automático por casillero, ver getArmorInfo para
+    // el único respaldo "automático" que existe: cuando los 3 están vacíos).
     getArmorInfo() {
         const buffDefense = this.foodBuffs.filter(b => b.stat === 'defensa').reduce((s, b) => s + b.amount, 0);
         const enchantDefense = this.getActiveEnchantEffects().flatDefenseBonus;
-        const crafted = this.getEquippedCraftedItem('armadura');
-        const info = crafted
-            ? { tier: TIERS.find(t => t.id === crafted.tierId), defense: crafted.defense + buffDefense + enchantDefense, rarity: getMonsterRarity(crafted.rarityId), craftedItemId: crafted.id }
-            : { tier: getTierForLevel(this.level), defense: Math.round(this.level * 0.056 + getTierForLevel(this.level).id * 3) + buffDefense + enchantDefense };
+        const pieces = ARMOR_SLOTS.map(s => this.getEquippedArmorPiece(s.id));
+        const anyEquipped = pieces.some(p => p);
+        const baseDefense = anyEquipped
+            ? pieces.reduce((sum, p) => sum + (p ? p.defense : 0), 0)
+            : Math.round(this.level * 0.056 + getTierForLevel(this.level).id * 3);
+        const info = { defense: baseDefense + buffDefense + enchantDefense, pieces };
 
         // Bono de armadura del Tanque: Resistencia (cargas activas, +10%
         // c/u, ver Combat.classCharge) + el escudo activo (armorBonusPercent
@@ -349,6 +401,20 @@ class Player {
         const armorBonusPercent = this.getTanqueArmorBonusPercent();
         if (armorBonusPercent) info.defense = Math.round(info.defense * (1 + armorBonusPercent) * 10) / 10;
         return info;
+    }
+
+    // % de daño extra otorgado por TODAS las piezas de armadura equipadas
+    // (suma de cada pieza — ver ARMOR_PIECE_VARIANTS) — leído por el resto
+    // de fórmulas de daño del jugador (ver Player.getDamage y la cadena
+    // universal de bonos en combat.js).
+    getArmorDamageBonusPercent() {
+        return this.getEquippedArmorPieces().reduce((sum, it) => sum + (it.dmgBonusPercent || 0), 0);
+    }
+
+    // % de vida máxima extra otorgado por TODAS las piezas de armadura
+    // equipadas — leído por recalcMaxHp.
+    getArmorHpBonusPercent() {
+        return this.getEquippedArmorPieces().reduce((sum, it) => sum + (it.hpBonusPercent || 0), 0);
     }
 
     getTanqueArmorBonusPercent() {
@@ -393,28 +459,40 @@ class Player {
     }
 
     // ----- CRAFTEO -----
-    // Consume `getCraftMaterialCost(tierId)` del material de ese tier +
-    // CRAFT_CORE_COST núcleos de la rareza elegida. La rareza del núcleo
-    // determina la rareza (y el bono de fuerza) del objeto resultante.
-    // Las armas (y herramientas) piden la mitad del costo en madera de ESE
-    // tier y la otra mitad en mena del mismo tier; la armadura sigue
-    // pidiendo solo mena.
+    // Armas de combate (mago/guerrero/picaro/tanque/arquero/barbaro, ver
+    // WEAPON_PIECE_TYPES): costo FIJO — WEAPON_CRAFT_ORE_COST (25) de mena
+    // + WEAPON_CRAFT_WOOD_COST (25) de madera del tier + WEAPON_CRAFT_PIECE_COST
+    // (5) piezas de esa MISMA profesión/rareza/tier (dropeadas por
+    // enemigos, ver getWeaponPieceId/Combat.onEnemyDefeated) — mismo
+    // criterio que craftArmorPiece, ya NO usa núcleos. Herramientas de
+    // recolección (leñador/minero/campesino, sin pieza propia): SIN
+    // cambios, siguen con el costo escalado por tier + 1 núcleo de la
+    // rareza elegida (getCraftMaterialCost/CRAFT_CORE_COST).
     craftItem(profId, tierId, rarityId) {
-        const isArmor = profId === 'armadura';
         const oreId = `mat_tier_${tierId}`;
         const woodId = `madera_tier_${tierId}`;
-        const totalCost = getCraftMaterialCost(tierId);
-        const woodCost = isArmor ? 0 : Math.round(totalCost / 2);
-        const oreCost = totalCost - woodCost;
-        const coreId = getNucleoId(rarityId, tierId);
-        const haveOre = this.materials[oreId] || 0;
-        const haveWood = this.materials[woodId] || 0;
-        const haveCore = this.materials[coreId] || 0;
-        if (haveOre < oreCost || (!isArmor && haveWood < woodCost) || haveCore < CRAFT_CORE_COST) return null;
+        const isCombatWeapon = !!WEAPON_PIECE_TYPES[profId];
 
-        this.materials[oreId] -= oreCost;
-        if (!isArmor) this.materials[woodId] -= woodCost;
-        this.materials[coreId] -= CRAFT_CORE_COST;
+        if (isCombatWeapon) {
+            const pieceId = getWeaponPieceId(profId, rarityId, tierId);
+            if ((this.materials[oreId] || 0) < WEAPON_CRAFT_ORE_COST) return null;
+            if ((this.materials[woodId] || 0) < WEAPON_CRAFT_WOOD_COST) return null;
+            if ((this.materials[pieceId] || 0) < WEAPON_CRAFT_PIECE_COST) return null;
+            this.materials[oreId] -= WEAPON_CRAFT_ORE_COST;
+            this.materials[woodId] -= WEAPON_CRAFT_WOOD_COST;
+            this.materials[pieceId] -= WEAPON_CRAFT_PIECE_COST;
+        } else {
+            const totalCost = getCraftMaterialCost(tierId);
+            const woodCost = Math.round(totalCost / 2);
+            const oreCost = totalCost - woodCost;
+            const coreId = getNucleoId(rarityId, tierId);
+            if ((this.materials[oreId] || 0) < oreCost) return null;
+            if ((this.materials[woodId] || 0) < woodCost) return null;
+            if ((this.materials[coreId] || 0) < CRAFT_CORE_COST) return null;
+            this.materials[oreId] -= oreCost;
+            this.materials[woodId] -= woodCost;
+            this.materials[coreId] -= CRAFT_CORE_COST;
+        }
 
         const prof = getProfession(profId);
         const tier = TIERS.find(t => t.id === tierId);
@@ -422,24 +500,20 @@ class Player {
 
         const item = {
             id: 'itm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-            kind: isArmor ? 'armor' : 'weapon',
+            kind: 'weapon',
             profId, tierId, rarityId,
+            damage: Math.round(prof.baseDamage * tier.mult * rarity.mult * 10) / 10,
             createdAt: Date.now(),
         };
-        if (isArmor) {
-            item.defense = Math.round(tier.id * 4 * rarity.mult);
-        } else {
-            item.damage = Math.round(prof.baseDamage * tier.mult * rarity.mult * 10) / 10;
-        }
         this.craftedItems.push(item);
         return item;
     }
 
     equipCraftedItem(itemId) {
         const item = this.craftedItems.find(it => it.id === itemId);
-        if (!item) return;
+        if (!item || item.kind !== 'weapon') return;
         const prof = getProfession(item.profId);
-        const isCombatWeapon = item.kind === 'weapon' && prof.id !== 'armadura' && prof.type !== 'gather';
+        const isCombatWeapon = prof.type !== 'gather';
 
         if (isCombatWeapon) {
             // Solo se puede llevar un arma de combate equipada a la vez: al
@@ -451,10 +525,56 @@ class Player {
             });
             this.activeProfession = item.profId;
         }
-        // La armadura y las herramientas de recolección se equipan en su
-        // propio "casillero" (profId), sin afectar el arma de combate ni la
+        // Las herramientas de recolección se equipan en su propio
+        // "casillero" (profId), sin afectar el arma de combate ni la
         // profesión activa.
         this.equippedCraftedByProf[item.profId] = item.id;
+    }
+
+    // ----- ARMADURA (3 piezas: casco/pechera/botas, ver ARMOR_SLOTS) -----
+    // Craftea 1 pieza de armadura terminada: consume ARMOR_CRAFT_ORE_COST
+    // (30) del material del tier elegido + ARMOR_CRAFT_PIECE_COST (5)
+    // piezas CRUDAS de esa MISMA variante/rareza/tier (dropeadas por
+    // enemigos, ver getArmorPieceId/Combat.onEnemyDefeated) — costo FIJO,
+    // no escala con tier/rareza como las armas. El jugador elige el
+    // casillero (slot) al craftear.
+    craftArmorPiece(slot, subtype, tierId, rarityId) {
+        if (!ARMOR_SLOTS.some(s => s.id === slot)) return null;
+        const stats = getArmorPieceStats(subtype, rarityId);
+        if (!stats) return null;
+        const oreId = `mat_tier_${tierId}`;
+        const pieceId = getArmorPieceId(subtype, rarityId, tierId);
+        if ((this.materials[oreId] || 0) < ARMOR_CRAFT_ORE_COST) return null;
+        if ((this.materials[pieceId] || 0) < ARMOR_CRAFT_PIECE_COST) return null;
+
+        this.materials[oreId] -= ARMOR_CRAFT_ORE_COST;
+        this.materials[pieceId] -= ARMOR_CRAFT_PIECE_COST;
+
+        const item = {
+            id: 'itm_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+            kind: 'armor', slot, subtype, tierId, rarityId,
+            defense: stats.defense, dmgBonusPercent: stats.dmgBonusPercent, hpBonusPercent: stats.hpBonusPercent,
+            createdAt: Date.now(),
+        };
+        this.craftedItems.push(item);
+        return item;
+    }
+
+    // Nivel mínimo requerido (ver getArmorEquipMinLevel) — no permite
+    // equipar una pieza demasiado avanzada para el nivel actual.
+    equipArmorPiece(itemId) {
+        const item = this.craftedItems.find(it => it.id === itemId && it.kind === 'armor');
+        if (!item) return false;
+        if (this.level < getArmorEquipMinLevel(item.tierId, item.rarityId)) return false;
+        this.equippedArmorBySlot[item.slot] = item.id;
+        this.recalcMaxHp();
+        return true;
+    }
+
+    unequipArmorSlot(slot) {
+        if (!(slot in this.equippedArmorBySlot)) return;
+        this.equippedArmorBySlot[slot] = null;
+        this.recalcMaxHp();
     }
 
     // ----- POCIONES -----
@@ -666,6 +786,7 @@ class Player {
         const eff = this.getActiveEnchantEffects();
         const potencia = this.getEffectiveStats().potencia;
         let dmg = weapon.damage * (1 + potencia * STAT_POTENCIA_DMG_PERCENT) * (1 + eff.dmgBonusPercent);
+        dmg *= (1 + this.getArmorDamageBonusPercent());
         return Math.round(dmg * 10) / 10;
     }
 
@@ -751,7 +872,14 @@ class Player {
         const idx = this.craftedItems.findIndex(it => it.id === itemId);
         if (idx === -1) return null;
         const item = this.craftedItems[idx];
-        if (this.equippedCraftedByProf[item.profId] === item.id) this.equippedCraftedByProf[item.profId] = null;
+        if (item.kind === 'armor') {
+            if (this.equippedArmorBySlot[item.slot] === item.id) {
+                this.equippedArmorBySlot[item.slot] = null;
+                this.recalcMaxHp();
+            }
+        } else if (this.equippedCraftedByProf[item.profId] === item.id) {
+            this.equippedCraftedByProf[item.profId] = null;
+        }
         const price = getCraftedItemSellPrice(item);
         this.craftedItems.splice(idx, 1);
         this.gold += price;
@@ -862,12 +990,18 @@ class Player {
         // Tanque: +50% de mitigación mientras esté parado dentro de su
         // propio Bastión (ver RT_SKILL1_ABILITIES.tanque/
         // Combat.getPlayerZoneDefenseBonusPercent) — 0 si no aplica.
-        const skillDefBonus = Combat.getSkill2DefenseBonusPercent(this.activeProfession) + Combat.getPlayerZoneDefenseBonusPercent();
+        // Tanque: +3%/stack de "Gigante" del Círculo del Gigante (tecla "3",
+        // ver RT_SKILL3_ABILITIES.tanque/Combat.getTanqueGiantDefenseBonusPercent)
+        // — mismo mecanismo que defPctPerStack, se suma a los demás bonos.
+        const skillDefBonus = Combat.getSkill2DefenseBonusPercent(this.activeProfession) + Combat.getPlayerZoneDefenseBonusPercent() + Combat.getTanqueGiantDefenseBonusPercent(this.activeProfession);
         dmg = Math.max(1, dmg - armor.defense * (1 + skillDefBonus) * 0.15);
 
         // Reducción de daño de encantamientos (ej. Fortaleza Marcial,
-        // Reparación Divina nivel 3 — ver enchantments.js).
-        const damageReducePercent = this.getActiveEnchantEffects().damageReducePercent;
+        // Reparación Divina nivel 3 — ver enchantments.js). El Círculo del
+        // Gigante del Tanque (tecla "3") suma su -30% acá también: es una
+        // reducción DIRECTA sobre el daño final, no un bono de mitigación
+        // de armadura (ver RT_SKILL3_ABILITIES.tanque.damageReducePercent).
+        const damageReducePercent = this.getActiveEnchantEffects().damageReducePercent + Combat.getSkill3TanqueDamageReducePercent(this.activeProfession);
         if (damageReducePercent) dmg *= (1 - Math.min(0.9, damageReducePercent));
 
         dmg = Math.round(dmg * 10) / 10;

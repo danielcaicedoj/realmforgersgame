@@ -272,12 +272,16 @@
     }
 
     // Sortea una rareza para el tipo de enemigo (6 niveles, ver MONSTER_RARITIES)
-    // y aplica su bono de fuerza (+10% acumulativo por nivel) a hp/dmg.
+    // y aplica su bono de fuerza: +10% acumulativo por nivel a la vida
+    // (rarity.mult, sin cambios), y el multiplicador LINEAL de daño pedido
+    // por el usuario al daño ya escalado por piso (rarity.dmgMult, ver
+    // getCommonEnemyDamageForFloor en constants.js — type.dmg entrando acá
+    // YA es el daño de un COMÚN en este piso, dmgMult lo ajusta a la rareza real).
     function applyMonsterRarity(type) {
         const rarity = rollMonsterRarity();
         type.rarity = rarity;
         type.hp = Math.max(1, Math.round(type.hp * rarity.mult));
-        type.dmg = Math.max(1, Math.round(type.dmg * rarity.mult));
+        type.dmg = Math.max(1, Math.round(type.dmg * rarity.dmgMult));
     }
 
     // Baraja un array in-place (Fisher-Yates).
@@ -1094,8 +1098,17 @@
         // Click izquierdo MANTENIDO: dispara Ataque 1 en bucle (ver
         // update()). mouseup se escucha en window (no en canvas) para que
         // soltar el botón fuera del canvas también detenga el ataque
-        // continuo — evita que quede "trabado" disparando.
+        // continuo — evita que quede "trabado" disparando. Click derecho:
+        // cancela el apuntado en curso de las teclas "1"/"3" (ver
+        // Combat.cancelAimSkill1/3) — al soltar la tecla después de esto,
+        // YA no se lanza el hechizo. No-opea sola si no se estaba apuntando
+        // nada (cancelAimSkill1/3 son seguros de llamar siempre).
         canvas.addEventListener('mousedown', e => {
+            if (e.button === 2) {
+                Combat.cancelAimSkill1();
+                Combat.cancelAimSkill3();
+                return;
+            }
             if (e.button !== 0) return;
             const canvasPos = getCanvasCoords(e.clientX, e.clientY);
             lastAimWorldPos = toWorldCoords(canvasPos.x, canvasPos.y);
@@ -1568,6 +1581,12 @@
         const armorColor = armorInfo.rarity ? armorInfo.rarity.color : NEUTRAL_COLOR;
         const weaponEmoji = player.getActiveProfessionDef().emoji;
 
+        // Invisibilidad de Doble Sombra del Pícaro (ver
+        // RT_SKILL3_ABILITIES.picaro): se dibuja semitransparente mientras
+        // dure, para que se note visualmente que está invisible.
+        const invisible = player.invisibleUntil && Date.now() < player.invisibleUntil;
+        if (invisible) ctx.globalAlpha = 0.35;
+
         ctx.beginPath();
         ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
         ctx.fillStyle = armorColor;
@@ -1597,6 +1616,8 @@
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(weaponEmoji, player.x, player.y + 1);
+
+        if (invisible) ctx.globalAlpha = 1;
     }
 
     // Anillo circular alrededor del jugador mientras se mantiene R con las
@@ -1820,6 +1841,9 @@
         });
 
         drawPlayerEntity();
+        Combat.renderPicaroClone(ctx); // clon de Doble Sombra (tecla "3" del Pícaro)
+        Combat.renderTanqueCircle(ctx); // Círculo del Gigante del Tanque (tecla "3"), anillo persistente mientras dure
+        Combat.renderBarbaroSpin(ctx); // Torbellino de Espadas del Bárbaro (tecla "3")
         Combat.renderEffects(ctx);
         Combat.renderSkill2(ctx);
         Combat.renderSkill1Aim(ctx, lastAimWorldPos); // vista previa mientras se mantiene "1" (línea/círculo)
