@@ -629,17 +629,17 @@ canvas {
 #cooldown-row { display: flex; gap: 10px; }
 .cooldown-circle {
     --cd-pct: 0deg;
+    position: relative;
     width: 54px;
     height: 54px;
     border-radius: 50%;
     background: conic-gradient(#5a4a8a var(--cd-pct), rgba(10,8,18,0.85) var(--cd-pct));
     border: 2px solid #4a3f6b;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
     color: #cfc8e0;
-    transition: background 0.1s linear;
+    transition: background 0.1s linear, border-color 0.15s ease;
 }
 .cooldown-circle.ready { border-color: #3ecf5e; box-shadow: 0 0 8px rgba(62, 207, 94, 0.6); }
 .cooldown-circle-special { border-color: #c9a63a; }
@@ -660,8 +660,9 @@ canvas {
     0%, 100% { box-shadow: 0 0 6px rgba(255, 209, 128, 0.5); }
     50% { box-shadow: 0 0 16px rgba(255, 209, 128, 0.95); }
 }
-.cd-key { font-size: 9px; opacity: 0.85; }
-.cd-timer { font-size: 13px; font-weight: bold; }
+.cd-key { font-size: 22px; font-weight: bold; line-height: 1; text-align: center; }
+.cd-key-wide { font-size: 12px; }
+.cd-timer { position: absolute; bottom: 3px; left: 50%; transform: translateX(-50%); font-size: 10px; opacity: 0.85; }
 #charge-bar-track {
     width: 220px;
     height: 10px;

@@ -1624,10 +1624,18 @@
         ctx.strokeStyle = 'rgba(0,0,0,0.35)';
         ctx.stroke();
 
-        ctx.font = `${Math.round(innerRadius * 1.3)}px sans-serif`;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(weaponEmoji, player.x, player.y + 1);
+        // Símbolo geométrico de clase (ver class-symbols.js) en vez del
+        // emoji, para las 6 clases de combate — el resto de profesiones
+        // (recolección/desarmado) no tiene símbolo definido, se mantiene el
+        // emoji como respaldo. La escala asume símbolos diseñados para un
+        // círculo de radio 40 (ver drawClassSymbol).
+        const symbolDrawn = drawClassSymbol(ctx, player.activeProfession, player.x, player.y, innerRadius / 40, weaponColor);
+        if (!symbolDrawn) {
+            ctx.font = `${Math.round(innerRadius * 1.3)}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(weaponEmoji, player.x, player.y + 1);
+        }
 
         if (invisible) ctx.globalAlpha = 1;
     }

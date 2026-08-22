@@ -1,5 +1,16 @@
 // ===== INTERFAZ DE USUARIO (HUD + PANELES) =====
 
+// Convierte un color hex ('#rrggbb') a rgba(...) con la transparencia dada —
+// usado para el relleno tintado de los círculos de cooldown (ver
+// updateCombatHUD), que necesita el mismo color del borde pero translúcido.
+function hexToRgba(hex, alpha) {
+    const clean = (hex || '#5a4a8a').replace('#', '');
+    const r = parseInt(clean.substring(0, 2), 16);
+    const g = parseInt(clean.substring(2, 4), 16);
+    const b = parseInt(clean.substring(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 // HTML con el daño (y cooldown) de cada ataque del arma de ese tier, para
 // mostrarlo en el inventario junto al arma equipada. `mult` aplica el bono
 // de rareza de un objeto crafteado (1 = sin bono, arma automática por nivel).
@@ -1298,11 +1309,20 @@ const UI = {
                 const onCooldown = !active && cdRemaining > 0;
                 circle.classList.toggle('ready', !active && !onCooldown);
                 circle.classList.toggle('toggle-active', active);
-                circle.style.borderColor = active && toggleCfg ? toggleCfg.color : '';
+                circle.style.borderColor = toggleCfg ? toggleCfg.color : '';
+                circle.style.background = `conic-gradient(${hexToRgba(toggleCfg && toggleCfg.color, 0.45)} var(--cd-pct), ${hexToRgba(toggleCfg && toggleCfg.color, 0.15)} var(--cd-pct))`;
                 circle.style.setProperty('--cd-pct', onCooldown ? `${Math.min(1, cdRemaining / cdTotal) * 360}deg` : '0deg');
-                timerEl.textContent = active ? `${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX}` : (onCooldown ? (cdRemaining / 1000).toFixed(1) : '✓');
+                timerEl.textContent = active ? `${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX}` : (onCooldown ? (cdRemaining / 1000).toFixed(1) : '');
                 continue;
             }
+
+            // Ataque 1/3: el borde y el relleno toman el color de la
+            // geometría de ataque de la clase (RT_ATTACK_GEOMETRY, mismo
+            // color que sus efectos visuales), igual que el resto de
+            // círculos de habilidad.
+            const attackGeo = getAttackGeometry(player.activeProfession, i === 2 ? 2 : 0);
+            circle.style.borderColor = attackGeo ? attackGeo.color : '';
+            circle.style.background = `conic-gradient(${hexToRgba(attackGeo && attackGeo.color, 0.45)} var(--cd-pct), ${hexToRgba(attackGeo && attackGeo.color, 0.15)} var(--cd-pct))`;
 
             // Ataque 1: el cooldown ya reducido por stacks de Pícaro/Arquero
             // (ver Combat.getSkill2CooldownReductionMs) — mismo valor que
@@ -1321,7 +1341,7 @@ const UI = {
             } else if (i === 2) {
                 timerEl.textContent = `${Combat.charge}/${RT_CHARGE_MAX}`;
             } else {
-                timerEl.textContent = '✓';
+                timerEl.textContent = '';
             }
         }
 
@@ -1333,12 +1353,14 @@ const UI = {
         const circle3 = document.getElementById('cd-circle-3');
         const timer3 = document.getElementById('cd-timer-3');
         if (circle3 && timer3) {
+            const skill1Fill = `conic-gradient(${hexToRgba(skill1Cfg && skill1Cfg.color, 0.45)} var(--cd-pct), ${hexToRgba(skill1Cfg && skill1Cfg.color, 0.15)} var(--cd-pct))`;
             const barbaroActive = player.activeProfession === 'barbaro' && Combat.skill1.barbaroActive;
             if (barbaroActive) {
                 const remaining = Math.max(0, Combat.skill1.barbaroActiveUntil - now);
                 circle3.classList.remove('ready');
                 circle3.classList.add('toggle-active');
                 circle3.style.borderColor = skill1Cfg ? skill1Cfg.color : '';
+                circle3.style.background = skill1Fill;
                 circle3.style.setProperty('--cd-pct', '0deg');
                 timer3.textContent = (remaining / 1000).toFixed(1);
             } else {
@@ -1347,9 +1369,10 @@ const UI = {
                 const pct = total > 0 ? Math.min(1, remaining / total) : 0;
                 circle3.classList.toggle('ready', remaining <= 0);
                 circle3.classList.remove('toggle-active');
-                circle3.style.borderColor = '';
+                circle3.style.borderColor = skill1Cfg ? skill1Cfg.color : '';
                 circle3.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
-                timer3.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '✓';
+                circle3.style.background = skill1Fill;
+                timer3.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '';
             }
         }
 
@@ -1362,6 +1385,8 @@ const UI = {
         if (circle4 && timer4) {
             if (!skill3Cfg) {
                 circle4.classList.remove('ready');
+                circle4.style.borderColor = '';
+                circle4.style.background = '';
                 circle4.style.setProperty('--cd-pct', '0deg');
                 timer4.textContent = '—';
             } else {
@@ -1369,8 +1394,10 @@ const UI = {
                 const remaining = Math.max(0, Combat.skill3CooldownUntil - now);
                 const pct = total > 0 ? Math.min(1, remaining / total) : 0;
                 circle4.classList.toggle('ready', remaining <= 0);
+                circle4.style.borderColor = skill3Cfg.color;
+                circle4.style.background = `conic-gradient(${hexToRgba(skill3Cfg.color, 0.45)} var(--cd-pct), ${hexToRgba(skill3Cfg.color, 0.15)} var(--cd-pct))`;
                 circle4.style.setProperty('--cd-pct', `${(1 - pct) * 360}deg`);
-                timer4.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '✓';
+                timer4.textContent = remaining > 0 ? (remaining / 1000).toFixed(1) : '';
             }
         }
 
@@ -1379,69 +1406,6 @@ const UI = {
         if (chargeFill) chargeFill.style.width = `${chargePct}%`;
         const chargeText = document.getElementById('charge-bar-text');
         if (chargeText) chargeText.textContent = `Cargas: ${Combat.charge}/${RT_CHARGE_MAX}`;
-
-        // Estado de la habilidad toggle (nombre + ACTIVA/inactiva + stacks
-        // o cooldown restante), ver RT_TOGGLE_SKILLS.
-        const skill2StatusEl = document.getElementById('skill2-status');
-        if (skill2StatusEl) {
-            if (!toggleCfg) {
-                skill2StatusEl.classList.add('hidden');
-            } else {
-                skill2StatusEl.classList.remove('hidden');
-                const active = Combat.skill2.active && Combat.skill2.profId === player.activeProfession;
-                if (active) {
-                    skill2StatusEl.innerHTML = `${toggleCfg.emoji} ${toggleCfg.name}: <span style="color:${toggleCfg.color}">ACTIVA</span> (${Combat.skill2.stacks}/${RT_TOGGLE_STACK_MAX} stacks)`;
-                } else {
-                    const cdRemaining = Math.max(0, Combat.skill2.activateCooldownUntil - now);
-                    skill2StatusEl.textContent = cdRemaining > 0
-                        ? `${toggleCfg.emoji} ${toggleCfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
-                        : `${toggleCfg.emoji} ${toggleCfg.name}: click derecho para activar`;
-                }
-            }
-        }
-
-        // Estado del hechizo de tecla "1" (nombre + ACTIVA/apuntando/
-        // cooldown restante), ver RT_SKILL1_ABILITIES.
-        const skill1StatusEl = document.getElementById('skill1-status');
-        if (skill1StatusEl) {
-            if (!skill1Cfg) {
-                skill1StatusEl.classList.add('hidden');
-            } else {
-                skill1StatusEl.classList.remove('hidden');
-                const barbaroActive = player.activeProfession === 'barbaro' && Combat.skill1.barbaroActive;
-                if (barbaroActive) {
-                    const remaining = Math.max(0, Combat.skill1.barbaroActiveUntil - now);
-                    skill1StatusEl.innerHTML = `${skill1Cfg.emoji} ${skill1Cfg.name}: <span style="color:${skill1Cfg.color}">ACTIVA</span> (${(remaining / 1000).toFixed(1)}s · [1] para cancelar con dash)`;
-                } else if (Combat.skill1.aiming) {
-                    skill1StatusEl.innerHTML = `${skill1Cfg.emoji} ${skill1Cfg.name}: <span style="color:${skill1Cfg.color}">apuntando...</span>`;
-                } else {
-                    const cdRemaining = Math.max(0, Combat.skill1CooldownUntil - now);
-                    skill1StatusEl.textContent = cdRemaining > 0
-                        ? `${skill1Cfg.emoji} ${skill1Cfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
-                        : `${skill1Cfg.emoji} ${skill1Cfg.name}: [1] para usar`;
-                }
-            }
-        }
-
-        // Estado del hechizo de tecla "3" (nombre + apuntando/cooldown
-        // restante), ver RT_SKILL3_ABILITIES — oculto para clases que
-        // todavía no tienen ninguno ahí.
-        const skill3StatusEl = document.getElementById('skill3-status');
-        if (skill3StatusEl) {
-            if (!skill3Cfg) {
-                skill3StatusEl.classList.add('hidden');
-            } else {
-                skill3StatusEl.classList.remove('hidden');
-                if (Combat.skill3.aiming) {
-                    skill3StatusEl.innerHTML = `${skill3Cfg.emoji} ${skill3Cfg.name}: <span style="color:${skill3Cfg.color}">apuntando...</span>`;
-                } else {
-                    const cdRemaining = Math.max(0, Combat.skill3CooldownUntil - now);
-                    skill3StatusEl.textContent = cdRemaining > 0
-                        ? `${skill3Cfg.emoji} ${skill3Cfg.name}: cooldown ${(cdRemaining / 1000).toFixed(1)}s`
-                        : `${skill3Cfg.emoji} ${skill3Cfg.name}: [3] para usar`;
-                }
-            }
-        }
 
         // Enemigo vivo más cercano (dentro de un radio de referencia), con
         // su nombre/rareza/HP en tiempo real.
