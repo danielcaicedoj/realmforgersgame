@@ -30,6 +30,7 @@
     let resourceZones = []; // [{ type, x, y }] centros de las zonas densas de recursos, para el minimapa
     let chests = [];
     let floatingTexts = []; // {x,y,text,color,life,vy}
+    let guideMarkers = []; // {x,y,life,maxLife} — 🕯️ del Pergamino Guía, ver usePergaminoGuia
     let gathering = null; // { node, elapsed }
     let opening = null; // { chest, elapsed } — abriendo un cofre
     let dead = false;
@@ -81,6 +82,7 @@
         Combat.spawnFloatingText = addFloatingText;
         UI.onUseTeleportScroll = requestTeleport;
         UI.onUseAlteracionScroll = useAlteracionScroll;
+        UI.onUseGuiaScroll = usePergaminoGuia;
         UI.onTeleportToFloor = teleportToFloor;
         UI.onEnterTaberna = enterTaberna;
         UI.onExitTaberna = exitTaberna;
@@ -107,8 +109,13 @@
         const img = sctx.createImageData(dungeon.cols, dungeon.rows);
         for (let cy = 0; cy < dungeon.rows; cy++) {
             for (let cx = 0; cx < dungeon.cols; cx++) {
-                const idx = (cy * dungeon.cols + cx) * 4;
-                if (dungeon.tiles[dungeon.tileIndex(cx, cy)] === 1) {
+                const tileIdx = dungeon.tileIndex(cx, cy);
+                // Las salas ocultas (ver generarSalasOcultas en
+                // grid-dungeon.js) nunca aparecen en el minimapa/mapa
+                // grande, descubiertas o no — por diseño, son secretas.
+                if (dungeon.ocultoId && dungeon.ocultoId[tileIdx]) continue;
+                if (dungeon.tiles[tileIdx] === 1) {
+                    const idx = (cy * dungeon.cols + cx) * 4;
                     img.data[idx] = 176; img.data[idx + 1] = 168; img.data[idx + 2] = 214; img.data[idx + 3] = 235;
                 }
             }
@@ -128,6 +135,9 @@
         minimapCtx.font = '9px sans-serif';
         resourceZones.forEach(z => {
             minimapCtx.fillText(RESOURCE_TYPES[z.type].emoji, z.x * scaleX, z.y * scaleY);
+        });
+        guideMarkers.forEach(m => {
+            minimapCtx.fillText('🕯️', m.x * scaleX, m.y * scaleY);
         });
         enemies.forEach(en => {
             if (!en.alive || !en.type.isBoss) return;
@@ -220,6 +230,9 @@
         mapLargeCtx.font = '16px sans-serif';
         resourceZones.forEach(z => {
             mapLargeCtx.fillText(RESOURCE_TYPES[z.type].emoji, z.x * scaleX, z.y * scaleY);
+        });
+        guideMarkers.forEach(m => {
+            mapLargeCtx.fillText('🕯️', m.x * scaleX, m.y * scaleY);
         });
         enemies.forEach(en => {
             if (!en.alive || !en.type.isBoss) return;
@@ -345,22 +358,46 @@
         // Zonas de recursos: salas completas densas en un solo tipo de
         // recurso, en vez de nodos sueltos repartidos por todo el piso.
         // Cada zona tiene además 1 nodo especial: 10x más lento pero rinde 10.
+        // Las zonas de 'rock' (mena/ore) se priorizan hacia salas con
+        // obstáculos temáticos de roca (ver ROOM_TYPES_CON_ROCA en
+        // constants.js) y sus nodos se ubican cerca/encima de esos
+        // obstáculos en vez de en un punto random de la sala.
         nodes = [];
         resourceZones = [];
-        const zoneRooms = shuffleArray(dungeon.rooms.slice());
-        let roomCursor = 0;
+        const salasDisponibles = shuffleArray(dungeon.rooms.slice());
+        const salasUsadas = new Set();
+        const tomarSala = preferirConRoca => {
+            if (preferirConRoca) {
+                const idx = salasDisponibles.findIndex(r => !salasUsadas.has(r)
+                    && ROOM_TYPES_CON_ROCA.includes(r.tipoEstructural) && r.obstaculos && r.obstaculos.length);
+                if (idx !== -1) { const r = salasDisponibles[idx]; salasUsadas.add(r); return r; }
+            }
+            const idx = salasDisponibles.findIndex(r => !salasUsadas.has(r));
+            if (idx === -1) return null;
+            const r = salasDisponibles[idx]; salasUsadas.add(r); return r;
+        };
+        const puntoCercaDeObstaculo = (room, obst) => {
+            const angulo = Math.random() * Math.PI * 2;
+            const dist = obst.radio * 0.3 + Math.random() * (obst.radio + 40);
+            const x = Math.min(room.x + room.w - 20, Math.max(room.x + 20, obst.x + Math.cos(angulo) * dist));
+            const y = Math.min(room.y + room.h - 20, Math.max(room.y + 20, obst.y + Math.sin(angulo) * dist));
+            return { x, y };
+        };
         ['tree', 'rock', 'plant', 'herb'].forEach(type => {
             for (let z = 0; z < RESOURCE_ZONES_PER_TYPE; z++) {
-                const room = zoneRooms[roomCursor++];
+                const room = tomarSala(type === 'rock');
                 if (!room) break; // sin más salas libres
                 const nodeCount = RESOURCE_ZONE_MIN_NODES + Math.floor(Math.random() * (RESOURCE_ZONE_MAX_NODES - RESOURCE_ZONE_MIN_NODES + 1));
                 const center = dungeon.randomPointInRoom(room, TILE_SIZE * 2);
                 const specialIndex = Math.floor(Math.random() * nodeCount);
+                const tieneObstaculosDeRoca = type === 'rock' && room.obstaculos && room.obstaculos.length;
                 for (let i = 0; i < nodeCount; i++) {
-                    const pos = dungeon.randomPointInRoom(room, TILE_SIZE * 1.5);
+                    const pos = tieneObstaculosDeRoca
+                        ? puntoCercaDeObstaculo(room, room.obstaculos[Math.floor(Math.random() * room.obstaculos.length)])
+                        : dungeon.randomPointInRoom(room, TILE_SIZE * 1.5);
                     nodes.push(new ResourceNode(type, pos.x, pos.y, i === specialIndex));
                 }
-                resourceZones.push({ type, x: center.x, y: center.y });
+                resourceZones.push({ type, x: center.x, y: center.y, radius: Math.max(room.w, room.h) * 0.55 });
             }
         });
 
@@ -392,6 +429,11 @@
         // rollChestGuardTarget en constants.js) y se repone si mueren.
         chests = [];
         opening = null;
+
+        // Marcadores del Pergamino Guía (ver usePergaminoGuia): apuntan a
+        // coordenadas de la sala oculta del piso ANTERIOR, ya sin sentido en
+        // el piso nuevo (se regenera todo, no hay seed) — se limpian acá.
+        guideMarkers = [];
         const chestRooms = shuffleArray(dungeon.rooms.slice());
         for (let i = 0; i < CHESTS_PER_FLOOR; i++) {
             const room = chestRooms[i];
@@ -441,6 +483,7 @@
         gathering = null;
         portals = [];
         portalsCercaHint = new Set();
+        guideMarkers = [];
 
         // La Taberna no tiene combate, así que la tecla "2" para
         // activar/desactivar la habilidad toggle queda bloqueada ahí (ver
@@ -1077,6 +1120,28 @@
         UI.renderInventory(player);
     }
 
+    // Pergamino Guía: marca con 🕯️ (30s, ver render()) el centro de la sala
+    // oculta más cercana al jugador (ver salasOcultas en dungeon,
+    // generarSalasOcultas en grid-dungeon.js). Si el piso no tiene ninguna,
+    // avisa y NO consume el pergamino.
+    function usePergaminoGuia() {
+        if (dead || Combat.active || inTaberna) return;
+        if ((player.materials.pergamino_guia || 0) <= 0) return;
+        if (!dungeon.salasOcultas || !dungeon.salasOcultas.length) {
+            UI.showLevelToastText('❌ No hay salas ocultas en este piso');
+            return;
+        }
+        let mejor = null, mejorDist = Infinity;
+        dungeon.salasOcultas.forEach(s => {
+            const d = Math.hypot(s.centro.x - player.x, s.centro.y - player.y);
+            if (d < mejorDist) { mejorDist = d; mejor = s; }
+        });
+        player.materials.pergamino_guia--;
+        guideMarkers.push({ x: mejor.centro.x, y: mejor.centro.y, life: 30000, maxLife: 30000 });
+        UI.showLevelToastText('🗺️ Pergamino Guía usado');
+        UI.renderInventory(player);
+    }
+
     function bindInput() {
         canvas.addEventListener('click', e => {
             const canvasPos = getCanvasCoords(e.clientX, e.clientY);
@@ -1522,6 +1587,17 @@
         }
 
         player.move(dirX, dirY, dt, (x, y, r) => dungeon.isWalkable(x, y, r));
+
+        // Salas ocultas ("cuevas" camufladas de pared, ver
+        // generarSalasOcultas en grid-dungeon.js): pisarlas las revela (dejan
+        // de verse como pared, ver renderWallsGrid) — nunca aparecen en el
+        // minimapa/mapa grande sea cual sea su estado (ver buildMinimapStatic).
+        if (dungeon.ocultoId) {
+            const tx = Math.floor(player.x / TILE_SIZE), ty = Math.floor(player.y / TILE_SIZE);
+            const ocultoId = dungeon.ocultoId[dungeon.tileIndex(tx, ty)];
+            if (ocultoId) dungeon.revelarSalaOculta(ocultoId);
+        }
+
         checkPortalCollisions();
         player.tick(dt);
         updateCamera();
@@ -1551,6 +1627,9 @@
 
         floatingTexts.forEach(f => { f.y += f.vy; f.life -= dt; });
         floatingTexts = floatingTexts.filter(f => f.life > 0);
+
+        guideMarkers.forEach(m => { m.life -= dt; });
+        guideMarkers = guideMarkers.filter(m => m.life > 0);
 
         saveTimer += dt;
         if (saveTimer > 5000) {
@@ -1600,7 +1679,7 @@
         if (invisible) ctx.globalAlpha = 0.35;
 
         ctx.beginPath();
-        ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+        ctx.arc(player.x, player.y, player.visualRadius, 0, Math.PI * 2);
         ctx.fillStyle = armorColor;
         ctx.fill();
         ctx.lineWidth = 2;
@@ -1612,10 +1691,10 @@
         const mount = player.getEquippedMount();
         if (mount) {
             const mountTier = TIERS.find(t => t.id === mount.tierId);
-            drawRarityRing(player.x, player.y, player.radius, mountTier.color);
+            drawRarityRing(player.x, player.y, player.visualRadius, mountTier.color);
         }
 
-        const innerRadius = player.radius * 0.6;
+        const innerRadius = player.visualRadius * 0.6;
         ctx.beginPath();
         ctx.arc(player.x, player.y, innerRadius, 0, Math.PI * 2);
         ctx.fillStyle = weaponColor;
@@ -1624,18 +1703,14 @@
         ctx.strokeStyle = 'rgba(0,0,0,0.35)';
         ctx.stroke();
 
-        // Símbolo geométrico de clase (ver class-symbols.js) en vez del
-        // emoji, para las 6 clases de combate — el resto de profesiones
-        // (recolección/desarmado) no tiene símbolo definido, se mantiene el
-        // emoji como respaldo. La escala asume símbolos diseñados para un
-        // círculo de radio 40 (ver drawClassSymbol).
-        const symbolDrawn = drawClassSymbol(ctx, player.activeProfession, player.x, player.y, innerRadius / 40, weaponColor);
-        if (!symbolDrawn) {
-            ctx.font = `${Math.round(innerRadius * 1.3)}px sans-serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.fillText(weaponEmoji, player.x, player.y + 1);
-        }
+        // Los símbolos geométricos de clase (ver class-symbols.js) quedan
+        // implementados y disponibles para usarse más adelante, pero por
+        // ahora el círculo del jugador vuelve a mostrar el emoji de la
+        // clase (a pedido explícito del usuario).
+        ctx.font = `${Math.round(innerRadius * 1.3)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(weaponEmoji, player.x, player.y + 1);
 
         if (invisible) ctx.globalAlpha = 1;
     }
@@ -1832,12 +1907,25 @@
         });
     }
 
+    // Tinte de piso (campo de trigo / grava de mena) alrededor de cada zona
+    // de recursos densa que tenga un tono definido — ver RESOURCE_ZONE_TINTS
+    // en constants.js y renderFloorTint en grid-dungeon.js (solo pinta
+    // tiles walkable, nunca paredes).
+    function drawResourceZoneTints() {
+        resourceZones.forEach(z => {
+            const tint = RESOURCE_ZONE_TINTS[z.type];
+            if (!tint || !z.radius) return;
+            renderFloorTint(dungeon, ctx, camera, CANVAS_WIDTH, CANVAS_HEIGHT, z.x, z.y, z.radius, tint.color, tint.maxAlpha);
+        });
+    }
+
     function render() {
         ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
         ctx.save();
         ctx.translate(-camera.x, -camera.y);
 
         dungeon.renderWalls(ctx, camera, CANVAS_WIDTH, CANVAS_HEIGHT);
+        drawResourceZoneTints();
         if (inTaberna) drawTabernaDecor();
         drawPortals();
         chests.forEach(drawChest);
@@ -1883,6 +1971,23 @@
             ctx.fillText(f.text, f.x, f.y);
         });
         ctx.globalAlpha = 1;
+
+        // Marcador del Pergamino Guía (🕯️, 30s, ver usePergaminoGuia) sobre
+        // la sala oculta más cercana — titila suave como una vela real, y se
+        // desvanece en su último segundo de vida en vez de cortar en seco.
+        if (guideMarkers.length) {
+            ctx.font = '30px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const now = Date.now();
+            guideMarkers.forEach(m => {
+                const titileo = 0.75 + 0.25 * Math.sin(now / 150);
+                const desvanecido = Math.min(1, m.life / 1000);
+                ctx.globalAlpha = titileo * desvanecido;
+                ctx.fillText('🕯️', m.x, m.y);
+            });
+            ctx.globalAlpha = 1;
+        }
 
         ctx.restore();
 

@@ -4,7 +4,16 @@ class Player {
     constructor() {
         this.x = WORLD_WIDTH / 2;
         this.y = WORLD_HEIGHT / 2;
-        this.radius = 22;
+        // Reducido de 22 a 16 (ver isWalkableGrid en grid-dungeon.js: chequea
+        // 4 puntos a `radius` del centro) para que quepa con margen por un
+        // pasillo de 1 tile (TILE_SIZE=40px) — con 22 el jugador quedaba
+        // trabado en huecos/pasajes angostos de las salas decoradas nuevas.
+        // `radius` sigue siendo el usado para colisión/movimiento; el
+        // círculo que se DIBUJA usa visualRadius (22, el tamaño de antes)
+        // para no achicar al jugador en pantalla — ver drawPlayerEntity en
+        // game.js.
+        this.radius = 16;
+        this.visualRadius = 22;
         this.baseSpeed = 5.1; // 1.5x la velocidad base (3.4); la montura equipada suma un % encima (ver getEffectiveSpeed)
 
         this.maxHp = 100;
@@ -849,6 +858,9 @@ class Player {
         if (id === 'pergamino_teletransporte') {
             this.materials[id] = Math.min(this.materials[id], MAX_PERGAMINOS_TELETRANSPORTE);
         }
+        if (id === 'pergamino_guia') {
+            this.materials[id] = Math.min(this.materials[id], MAX_PERGAMINOS_GUIA);
+        }
     }
 
     gainGold(amount) {
@@ -919,6 +931,14 @@ class Player {
         if (this.gold < SHOP_SCROLL_PRICE) return false;
         this.gold -= SHOP_SCROLL_PRICE;
         this.gainMaterial('pergamino_teletransporte', 1);
+        return true;
+    }
+
+    buyGuiaScroll() {
+        if ((this.materials.pergamino_guia || 0) >= MAX_PERGAMINOS_GUIA) return false;
+        if (this.gold < SHOP_GUIA_SCROLL_PRICE) return false;
+        this.gold -= SHOP_GUIA_SCROLL_PRICE;
+        this.gainMaterial('pergamino_guia', 1);
         return true;
     }
 

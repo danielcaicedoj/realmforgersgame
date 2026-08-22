@@ -1144,9 +1144,6 @@ const Combat = {
 
         const { totalDamage } = this.resolveAttackDamage(effectiveAtk, targets, eff);
 
-        // Carga universal: +1 por enemigo golpeado (igual que Ataque1).
-        this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
-
         const lifestealPct = (eff.lifestealPercent || 0) + this.getSkill2LifestealBonusPercent(profId) + this.getSkill1LifestealBonusPercent(profId);
         if (lifestealPct > 0 && totalDamage > 0) {
             const healAmt = Math.round(totalDamage * lifestealPct);
@@ -2093,7 +2090,6 @@ const Combat = {
             flatPenetration,
         };
         this.resolveAttackDamage(effectiveAtk, targets, eff);
-        this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
 
         this.effects.push({ kind: 'circle', x: clone.x, y: clone.y, followPlayer: false, range: effRadius, startRange: effRadius * 0.85, color: cfg.color, createdAt: Date.now(), duration: 200 });
     },
@@ -2834,15 +2830,6 @@ const Combat = {
             targets[0].defenseMod = { percent: atk.bonusDefenseDownPercent || 0, flat: 0, expiresAt: Date.now() + (atk.bonusDefenseDownTurns || 1) * 1000 };
         }
 
-        // Ataque 1 (slot 0): +1 carga universal POR CADA enemigo golpeado
-        // (no un flat +1 por ataque) — golpear 3 enemigos da +3 cargas,
-        // tope RT_CHARGE_MAX.
-        if (slot === 0 && hitLanded) {
-            this.charge = Math.min(RT_CHARGE_MAX, this.charge + targets.length);
-            if (targets.length > 1 && this.spawnFloatingText) {
-                this.spawnFloatingText(player.x, player.y - player.radius - 34, `+${targets.length} cargas`, '#66ccff', 700);
-            }
-        }
         if (slot === 2) this.charge = 0; // el especial consume las 10 cargas
 
         const totalDealt = totalDamage + bonusTotal;
@@ -3536,6 +3523,12 @@ const Combat = {
         // se entrega recién cuando el jugador lo abre, sin importar la
         // distancia a la que haya muerto el jefe.
         const chestLoot = (isFinalBoss && target.linkedChest) ? {} : null;
+
+        // Carga universal de Ataque 3 (Espacio, ver RT_CHARGE_MAX): +1 carga
+        // por CADA enemigo muerto, sin importar qué lo mató — antes cargaba
+        // por golpe conectado (targets.length de Ataque1/2), a pedido del
+        // usuario ahora carga por muerte en vez de por golpe.
+        this.charge = Math.min(RT_CHARGE_MAX, this.charge + 1);
 
         // Habilidad toggle (Ataque 2): +1 stack por CADA enemigo muerto
         // mientras está activa, sin importar qué lo mató (golpe, DoT, etc.).

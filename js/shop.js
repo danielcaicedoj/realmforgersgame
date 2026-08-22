@@ -7,6 +7,7 @@
 const SHOP_TIER_MULT = { 1: 1, 2: 2, 3: 4, 4: 8, 5: 16, 6: 32, 7: 64, 8: 128, 9: 256, 10: 512 };
 const SHOP_RARITY_MULT = { comun: 1, poco_comun: 2, raro: 3, epico: 6, legendario: 9, mitico: 12 };
 const SHOP_SCROLL_PRICE = 10; // pergamino de teletransportación, stock infinito
+const SHOP_GUIA_SCROLL_PRICE = 10; // pergamino guía, stock infinito (ver Player.buyGuiaScroll)
 
 function getNucleoSellPrice(tierId, rarityId) {
     return (SHOP_TIER_MULT[tierId] || 1) * (SHOP_RARITY_MULT[rarityId] || 1);

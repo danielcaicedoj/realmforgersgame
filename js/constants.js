@@ -113,6 +113,44 @@ function generateChestLoot(rarity, floor) {
 // del tilemap de colisiones.
 const TILE_SIZE = 40;
 
+// ----- TIPOS ESTRUCTURALES DE SALA (paredes internas / obstáculos) -----
+// Ver elegirTipoEstructural/decorarSala en grid-dungeon.js. `peso` son
+// probabilidades relativas que suman 1.0 sobre los 10 tipos; en tiempo de
+// ejecución se filtra por minAncho/minAlto según el tamaño REAL de cada
+// sala (rango real: 300x300 .. 1600x1200, ver TAMAÑO_SALA_* en
+// grid-dungeon.js) y se renormaliza solo entre los tipos que caben, así
+// las salas más chicas caen sobre todo en vacia_simple/escombros/bosque.
+// (El pedido original hablaba de "12 tipos" pero solo detalló 11; el 11º,
+// "Plataformas 2 Niveles", se descartó a pedido del usuario por depender
+// de un eje de altura que este motor top-down de una sola capa no tiene.)
+const ROOM_STRUCTURE_TYPES = [
+    { id: 'vacia_simple',       peso: 0.12, minAncho: 300,  minAlto: 300 },
+    { id: 'vacia_gigante',      peso: 0.08, minAncho: 700,  minAlto: 700 },
+    { id: 'laberinto_simple',   peso: 0.10, minAncho: 700,  minAlto: 700 },
+    { id: 'crucero',            peso: 0.08, minAncho: 600,  minAlto: 600 },
+    { id: 'compartimentada',    peso: 0.07, minAncho: 900,  minAlto: 900 },
+    { id: 'escombros',          peso: 0.14, minAncho: 500,  minAlto: 500 },
+    { id: 'bosque',             peso: 0.12, minAncho: 500,  minAlto: 500 },
+    { id: 'laberinto_complejo', peso: 0.09, minAncho: 900,  minAlto: 700 },
+    { id: 'anillo_batalla',     peso: 0.10, minAncho: 700,  minAlto: 700 },
+    { id: 'catacumbas',         peso: 0.10, minAncho: 1000, minAlto: 800 },
+];
+
+// ----- TINTE DE PISO POR ZONA DE RECURSO (ver renderFloorTint en
+// grid-dungeon.js / drawResourceZoneTints en game.js) -----
+// Solo trigo/mena piden tinte visual; árbol/hierba se quedan sin tocar.
+const RESOURCE_ZONE_TINTS = {
+    plant: { color: '#e6c66a', maxAlpha: 0.38 }, // amarillo pastel cálido, "campo de trigo"
+    rock:  { color: '#b5b0a6', maxAlpha: 0.36 }, // gris roca clarito, "piso de grava"
+};
+
+// Tipos de sala con obstáculos temáticos de ROCA (ver decorarSala en
+// grid-dungeon.js) — usados para priorizar dónde aparecen las zonas de
+// mena/ore y pegar sus nodos cerca/encima de esos obstáculos (ver loadFloor
+// en game.js). vacia_gigante (columnas) y bosque (árboles) quedan afuera:
+// mismos obstáculos circulares, pero temáticamente no son "roca".
+const ROOM_TYPES_CON_ROCA = ['escombros', 'laberinto_complejo', 'catacumbas'];
+
 // El nivel ya no es por arma/profesión: es un único nivel de jugador (1-1000)
 // que sube con toda la XP ganada (combate, recolección, encantamiento) y
 // determina el tier de TODAS las armas/armadura por igual.
@@ -981,6 +1019,14 @@ WOOD_TIERS.forEach(t => {
 // Combat.onEnemyDefeated). Al usarse abren el mapa; el próximo click ahí
 // teletransporta al jugador (ver game.js).
 MATERIAL_INFO.pergamino_teletransporte = { name: 'Pergamino de Teletransportación', emoji: '📜' };
+
+// ----- PERGAMINO GUÍA (ver usePergaminoGuia en game.js) -----
+// Objeto de 1 solo uso, solo se compra al Mercader (ver SHOP_GUIA_SCROLL_PRICE
+// en shop.js) — no dropea de enemigos/cofres como los otros pergaminos. Al
+// usarse marca con 🕯️ (30s) el centro de la sala oculta más cercana (ver
+// generarSalasOcultas en grid-dungeon.js).
+const MAX_PERGAMINOS_GUIA = 10; // cap de inventario, ver Player.gainMaterial
+MATERIAL_INFO.pergamino_guia = { name: 'Pergamino Guía', emoji: '🗺️' };
 
 // ----- PERGAMINO DE ALTERACIÓN (ver SISTEMA DE ZONAS DE JUGADOR en game.js) -----
 // Consumible que crea una zona de spawn incrementado (igual mecánica que las

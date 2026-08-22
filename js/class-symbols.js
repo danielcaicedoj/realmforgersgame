@@ -9,6 +9,15 @@
 // emoji" tomada explícitamente por el usuario.
 const CLASS_SYMBOL_COLOR = '#000';
 
+// El color del símbolo es el color de clase que YA usa el juego (mismo que
+// el de sus habilidades y el de los círculos de cooldown, ver
+// RT_TOGGLE_SKILLS en constants.js — ej. Mago = azul neón #00ffff) — no un
+// color nuevo inventado.
+function getClassSymbolColor(classId) {
+    const cfg = RT_TOGGLE_SKILLS[classId];
+    return (cfg && cfg.color) || CLASS_SYMBOL_COLOR;
+}
+
 function drawArqueroSymbol(ctx) {
     ctx.beginPath();
     ctx.moveTo(0, -20); ctx.lineTo(-8, -8); ctx.lineTo(8, -8);
@@ -66,7 +75,7 @@ function drawMagoSymbol(ctx) {
 // holeColor: el punto central funciona como un "agujero" que muestra el
 // color del círculo de fondo detrás (mismo truco visual de la referencia
 // original), en vez de un color de clase fijo que ya no aplica acá.
-function drawGuerreroSymbol(ctx, holeColor) {
+function drawGuerreroSymbol(ctx, holeColor, mainColor) {
     ctx.beginPath(); ctx.moveTo(0, -16); ctx.lineTo(12, 0); ctx.lineTo(0, 16); ctx.lineTo(-12, 0); ctx.closePath(); ctx.fill();
 
     ctx.beginPath(); ctx.moveTo(-6, -14); ctx.lineTo(6, -14); ctx.lineTo(0, -24); ctx.closePath(); ctx.fill();
@@ -81,7 +90,7 @@ function drawGuerreroSymbol(ctx, holeColor) {
 
     ctx.fillStyle = holeColor || CLASS_SYMBOL_COLOR;
     ctx.beginPath(); ctx.arc(0, 0, 2.5, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = CLASS_SYMBOL_COLOR;
+    ctx.fillStyle = mainColor || CLASS_SYMBOL_COLOR;
 }
 
 function drawBarbaroSymbol(ctx) {
@@ -143,12 +152,13 @@ const CLASS_SYMBOL_DRAWERS = {
 function drawClassSymbol(ctx, classId, x, y, scale, holeColor) {
     const drawer = CLASS_SYMBOL_DRAWERS[classId];
     if (!drawer) return false;
+    const color = getClassSymbolColor(classId);
     ctx.save();
     ctx.translate(x, y);
     ctx.scale(scale, scale);
-    ctx.fillStyle = CLASS_SYMBOL_COLOR;
-    ctx.strokeStyle = CLASS_SYMBOL_COLOR;
-    drawer(ctx, holeColor);
+    ctx.fillStyle = color;
+    ctx.strokeStyle = color;
+    drawer(ctx, holeColor, color);
     ctx.restore();
     return true;
 }

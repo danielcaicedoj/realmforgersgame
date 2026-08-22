@@ -386,7 +386,7 @@ const UI = {
 
         // Un ítem es "Consumible" (poción/pergamino/alimento); todo lo demás
         // (núcleos, mena, madera, hierba, cultivo) es "Recurso".
-        const isConsumableMaterial = id => id.startsWith('pocion_') || id === 'pergamino_teletransporte' || id.startsWith('pergamino_alteracion_') || id.startsWith('food_');
+        const isConsumableMaterial = id => id.startsWith('pocion_') || id === 'pergamino_teletransporte' || id === 'pergamino_guia' || id.startsWith('pergamino_alteracion_') || id.startsWith('food_');
 
         const renderMaterialGrid = (ids, emptyText) => {
             if (ids.length === 0) {
@@ -402,14 +402,16 @@ const UI = {
                 const info = getMaterialInfo(id);
                 const isPotion = id.startsWith('pocion_');
                 const isScroll = id === 'pergamino_teletransporte';
+                const isGuia = id === 'pergamino_guia';
                 const isAlteracion = id.startsWith('pergamino_alteracion_');
                 const isFood = id.startsWith('food_');
                 const chip = document.createElement('div');
-                chip.className = 'resource-chip' + (isPotion || isScroll || isAlteracion || isFood ? ' resource-chip-potion' : '');
+                chip.className = 'resource-chip' + (isPotion || isScroll || isGuia || isAlteracion || isFood ? ' resource-chip-potion' : '');
                 chip.innerHTML = `
                     <span class="resource-emoji">${info.emoji}</span><span class="resource-name">${info.name}</span><span class="resource-qty">x${player.materials[id]}</span>
                     ${isPotion ? `<button class="use-potion-btn" data-use-potion="${id.slice('pocion_'.length)}">Usar</button>` : ''}
                     ${isScroll ? `<button class="use-potion-btn" data-use-scroll="1">Usar</button>` : ''}
+                    ${isGuia ? `<button class="use-potion-btn" data-use-guia="1">Usar</button>` : ''}
                     ${isAlteracion ? `<button class="use-potion-btn" data-use-alteracion="${id.slice('pergamino_alteracion_tier'.length)}">Usar</button>` : ''}
                     ${isFood ? `<button class="use-potion-btn" data-use-food="${id.slice('food_'.length)}">Usar</button>` : ''}
                 `;
@@ -572,6 +574,11 @@ const UI = {
         list.querySelectorAll('[data-use-scroll]').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (this.onUseTeleportScroll) this.onUseTeleportScroll();
+            });
+        });
+        list.querySelectorAll('[data-use-guia]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (this.onUseGuiaScroll) this.onUseGuiaScroll();
             });
         });
         list.querySelectorAll('[data-use-alteracion]').forEach(btn => {
@@ -1735,6 +1742,19 @@ const UI = {
         `;
         buyEl.appendChild(scrollRow);
 
+        const guiaInfo = getMaterialInfo('pergamino_guia');
+        const guiaRow = document.createElement('div');
+        guiaRow.className = 'shop-row';
+        guiaRow.innerHTML = `
+            <div class="item-emoji">${guiaInfo.emoji}</div>
+            <div class="item-info">
+                <div class="item-name">${guiaInfo.name}</div>
+                <div class="item-sub">Infinito · ${SHOP_GUIA_SCROLL_PRICE} 🪙</div>
+            </div>
+            <button class="shop-btn" data-buy-guia="1">Comprar</button>
+        `;
+        buyEl.appendChild(guiaRow);
+
         player.merchantListings.forEach(listing => {
             const label = this.getShopItemLabel(listing);
             const qtyLabel = listing.type === 'material' ? `x${listing.qty} · ` : '';
@@ -1779,6 +1799,14 @@ const UI = {
         buyEl.querySelectorAll('[data-buy-scroll]').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (!player.buyScroll()) { this.showLevelToastText('❌ Oro insuficiente o pergaminos al máximo'); return; }
+                this.renderShopPanel(player);
+                this.renderInventory(player);
+                this.updateHUD(player);
+            });
+        });
+        buyEl.querySelectorAll('[data-buy-guia]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (!player.buyGuiaScroll()) { this.showLevelToastText('❌ Oro insuficiente o pergaminos al máximo'); return; }
                 this.renderShopPanel(player);
                 this.renderInventory(player);
                 this.updateHUD(player);
